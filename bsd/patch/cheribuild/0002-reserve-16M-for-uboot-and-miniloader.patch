@@ -1,0 +1,35 @@
+From 0dfc42dd3a9ae9f168001289083b8aed772bf2ca Mon Sep 17 00:00:00 2001
+From: zhugengyu <zhugengyu2023@gmail.com>
+Date: Fri, 28 Nov 2025 18:12:05 +0800
+Subject: [PATCH] reserve 16M for uboot and miniloader
+
+---
+ pycheribuild/projects/disk_image.py | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/pycheribuild/projects/disk_image.py b/pycheribuild/projects/disk_image.py
+index a6f74171..3c118688 100644
+--- a/pycheribuild/projects/disk_image.py
++++ b/pycheribuild/projects/disk_image.py
+@@ -704,7 +704,7 @@ class BuildDiskImageBase(SimpleProject):
+                 self.make_efi_partition(efi_partition)
+                 if not efi_partition.exists() and not self.config.pretend:
+                     self.fatal("Failed to create the EFI partition", efi_partition)
+-                mkimg_efi_args = ["-p", "efi:=" + str(efi_partition)]
++                mkimg_efi_args = ["-p", "efi:=" + str(efi_partition) + ":16777216"] # 32768 * 512，reserve space for miniloader and u-boot
+             else:
+                 mkimg_efi_args = []
+ 
+@@ -769,7 +769,8 @@ class BuildDiskImageBase(SimpleProject):
+                         "-t",
+                         "msdos",
+                         "-s",
+-                        "2m",
++                        #"2m",
++                        "80m",
+                         # "-d", "0x2fffffff",  # super verbose output
+                         # "-d", "0x20000000",  # MSDOSFS debug output
+                         "-B",
+-- 
+2.25.1
+

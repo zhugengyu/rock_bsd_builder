@@ -53,3 +53,17 @@ dkms.conf
 
 # debug information files
 *.dwo
+
+linux/out
+linux/build
+linux/rkbin
+linux/u-boot
+linux/kernel
+
+bsd/build
+bsd/cheribuild
+bsd/freebsd
+bsd/netbsd
+
+*.img
+*.tar.xz

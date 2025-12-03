@@ -1,0 +1,30 @@
+From 00aed4e2436a4a66f8e66767bc3c70f8deca723b Mon Sep 17 00:00:00 2001
+From: zhugengyu <zhugengyu2023@gmail.com>
+Date: Thu, 27 Nov 2025 17:19:52 +0800
+Subject: [PATCH] skip query for unlisted dtb file
+
+---
+ pycheribuild/projects/disk_image.py | 7 ++++---
+ 1 file changed, 4 insertions(+), 3 deletions(-)
+
+diff --git a/pycheribuild/projects/disk_image.py b/pycheribuild/projects/disk_image.py
+index bbf726bc..a6f74171 100644
+--- a/pycheribuild/projects/disk_image.py
++++ b/pycheribuild/projects/disk_image.py
+@@ -1052,9 +1052,10 @@ class BuildDiskImageBase(SimpleProject):
+             print("Found the following files in the rootfs that are not listed in METALOG:")
+             for i in unlisted_files:
+                 print("\t", i[1])
+-            if self.query_yes_no(
+-                "Should these files also be added to the image?", default_result=True, force_result=True
+-            ):
++            # if self.query_yes_no(
++            #     "Should these files also be added to the image?", default_result=True, force_result=True
++            # ):
++            if True:
+                 for i in unlisted_files:
+                     self.mtree.add_file(i[0], i[1], print_status=self.config.verbose)
+ 
+-- 
+2.25.1
+
