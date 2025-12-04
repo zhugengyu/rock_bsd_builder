@@ -22,8 +22,12 @@ make freebsd_tool_depends
 make freebsd_all
 ```
 
+- 启动后参考[setup-freebsd](./bsd/doc/setup-freebsd.md)进行设置
+
 - 构建 NetBSD 10，通用镜像
 
 ```
 make netbsd_all
 ```
+
+- 启动后参考[setup-netbsd](./bsd/doc/setup-netbsd.md)进行设置
