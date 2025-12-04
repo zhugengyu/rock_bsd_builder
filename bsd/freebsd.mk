@@ -33,7 +33,8 @@ freebsd_src_dl:
 		git am $(FREEBSD_ROOT_DIR)/patch/cheribuild/*.patch; \
 	fi
 	@if [ ! -d $(FREEBSD_DIR) ]; then \
-		git clone $(FREEBSD_URL) $(FREEBSD_DIR) -b $(FREEBSD_BRANCH) --depth=1; \
+		git clone $(FREEBSD_URL) $(FREEBSD_DIR) -b $(FREEBSD_BRANCH) --depth=1 && \
+		cd $(FREEBSD_DIR) && git am $(FREEBSD_ROOT_DIR)/patch/freebsd/*.patch; \
 	fi
 
 freebsd_aarch64_image:
