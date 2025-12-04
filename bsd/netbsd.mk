@@ -18,7 +18,8 @@ NETBSD_AARCH64_TOOLS := $(NETBSD_ROOT_DIR)/build/tooldir.$(HOST_UNAME_S)-$(HOST_
 
 netbsd_src_dl:
 	@if [ ! -d $(NETBSD_DIR) ]; then \
-		git clone $(NETBSD_URL) $(NETBSD_DIR) -b $(NETBSD_BRANCH) --depth=1; \
+		git clone $(NETBSD_URL) $(NETBSD_DIR) -b $(NETBSD_BRANCH) --depth=1 && \
+		cd $(NETBSD_DIR) && git am $(NETBSD_ROOT_DIR)/patch/netbsd/*.patch; \
 	fi
 
 netbsd_aarch64_image:
