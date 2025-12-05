@@ -193,3 +193,24 @@ pkg add /usr/ports/benchmarks/unixbench/work/pkg/unixbench-<version>.txz
 
 unixbench --version
 ```
+
+## 使用 crochet 构建镜像
+
+> 使用 root 用户进行编译，编译前确保 freebsd 源码下载到 /usr/src 目录下
+```
+# LLVM 工具的路径按照实际情况设置
+export PATH=/usr/local/bin:$PATH
+export CC=/usr/local/bin/clang15
+export CXX=/usr/local/bin/clang++15
+export LD=/usr/local/bin/ld.lld15
+export CPP=/usr/local/bin/clang-cpp15
+export HOSTCC=/usr/local/bin/clang15
+export HOSTCXX=/usr/local/bin/clang++15
+export LLVM_CONFIG=/usr/local/bin/llvm-config15
+
+git clone https://github.com/freebsd/crochet.git
+cd crochet
+pkg install u-boot-nanopi-r4s
+export IMAGE_SIZE=4096
+/bin/sh crochet.sh -b NanoPi-R4S -v
+```
