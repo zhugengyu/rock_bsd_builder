@@ -1,6 +1,9 @@
 # Rock BSD Builder
 
 - 本项目提供了一个在 RK3399 平台上交叉编译构建 Linux/FreeBSD/NetBSD 镜像的脚本工具
+
+![toybrick-rk3399prod](./figs/toybrick-rk3399prod.jpeg)
+
 > 支持 Ubuntu 20.04 AMD64, Debian12 AMD64, Debian13 AMD64
 > 构建前需要确保当前网络环境足够科学
 
