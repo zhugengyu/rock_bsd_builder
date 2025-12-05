@@ -2,7 +2,7 @@
 
 # UEFI firmware URLs and files
 UEFI_URL_BASE = https://personalbsd.org/download/UEFI-RK3399
-IDBLOADER_BIN = idbloader.img
+UEFI_IDBLOADER_BIN = idbloader.img
 RK3399_SDK_UEFI_IMG = RK3399_SDK_UEFI.img
 TRUST_IMG = trust.img
 ESP_SIZE_MB = 112
@@ -46,7 +46,7 @@ endef
 .PHONY: uefi_info
 uefi_info:
 	@echo "Rockchip RK3399 UEFI firmware partition layout:"
-	@echo "  Loader1:    Sectors $(LOADER1_START_SECTOR)-$(LOADER1_END_SECTOR) -> $(IDBLOADER_BIN)"
+	@echo "  Loader1:    Sectors $(LOADER1_START_SECTOR)-$(LOADER1_END_SECTOR) -> $(UEFI_IDBLOADER_BIN)"
 	@echo "  Reserved1:  Sectors $(RESERVED1_START_SECTOR)-$(RESERVED1_END_SECTOR)"
 	@echo "  Reserved2:  Sectors $(RESERVED2_START_SECTOR)-$(RESERVED2_END_SECTOR)"
 	@echo "  Loader2:    Sectors $(LOADER2_START_SECTOR)-$(LOADER2_END_SECTOR) -> $(RK3399_SDK_UEFI_IMG)"
@@ -62,12 +62,12 @@ uefi_image: uefi_info $(UEFI_IMAGE)
 	ls -lh $(UEFI_IMAGE)
 
 # Create firmware image (depends on downloaded files)
-$(UEFI_IMAGE): $(IDBLOADER_BIN) $(RK3399_SDK_UEFI_IMG) $(TRUST_IMG)
+$(UEFI_IMAGE): $(UEFI_IDBLOADER_BIN) $(RK3399_SDK_UEFI_IMG) $(TRUST_IMG)
 	@echo "Creating $(TOTAL_SIZE_MB)MB UEFI firmware image..."
 	dd if=/dev/zero of=$(UEFI_IMAGE) bs=1M count=$(TOTAL_SIZE_MB) status=progress
 	
 	@echo "Writing idbloader.bin (loader1, seek=$(LOADER1_START_SECTOR))..."
-	dd if=$(IDBLOADER_BIN) of=$(UEFI_IMAGE) seek=$(LOADER1_START_SECTOR) bs=$(SECTOR_SIZE) conv=sync status=progress
+	dd if=$(UEFI_IDBLOADER_BIN) of=$(UEFI_IMAGE) seek=$(LOADER1_START_SECTOR) bs=$(SECTOR_SIZE) conv=sync status=progress
 	
 	@echo "Creating reserved1 partition (zero filled)..."
 	dd if=/dev/zero of=$(UEFI_IMAGE) seek=$(RESERVED1_START_SECTOR) bs=$(SECTOR_SIZE) count=$$(($(RESERVED1_END_SECTOR) - $(RESERVED1_START_SECTOR) + 1)) conv=sync status=none
@@ -85,8 +85,8 @@ $(UEFI_IMAGE): $(IDBLOADER_BIN) $(RK3399_SDK_UEFI_IMG) $(TRUST_IMG)
 	dd if=/dev/zero of=$(UEFI_IMAGE) seek=$(ESP_START_SECTOR) bs=$(SECTOR_SIZE) count=$$(($(ESP_END_SECTOR) - $(ESP_START_SECTOR) + 1)) conv=sync status=none
 
 # Download UEFI files if not present
-$(IDBLOADER_BIN):
-	$(call download_if_needed,$(IDBLOADER_BIN),$(UEFI_URL_BASE)/$(IDBLOADER_BIN))
+$(UEFI_IDBLOADER_BIN):
+	$(call download_if_needed,$(UEFI_IDBLOADER_BIN),$(UEFI_URL_BASE)/$(UEFI_IDBLOADER_BIN))
 
 $(RK3399_SDK_UEFI_IMG):
 	$(call download_if_needed,$(RK3399_SDK_UEFI_IMG),$(UEFI_URL_BASE)/$(RK3399_SDK_UEFI_IMG))
@@ -96,4 +96,4 @@ $(TRUST_IMG):
 
 # Clean generated files
 uefi_clean:
-	rm -f $(UEFI_IMAGE) $(IDBLOADER_BIN) $(RK3399_SDK_UEFI_IMG) $(TRUST_IMG)
+	rm -f $(UEFI_IMAGE) $(UEFI_IDBLOADER_BIN) $(RK3399_SDK_UEFI_IMG) $(TRUST_IMG)

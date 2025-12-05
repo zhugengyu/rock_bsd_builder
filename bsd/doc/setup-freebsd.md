@@ -51,8 +51,10 @@ export https_proxy="http://192.168.00.129:7890"
 
 ```
 pkg update -f
-pkg install -y fastfetch nano llvm15 git python3 usbutils pciutils lscpu lsblk
+pkg install -y fastfetch nano llvm15 git python3 usbutils pciutils lscpu lsblk wget
 ```
+
+![freebsd_pkg](./figs/freebsd_pkg.png)
 
 ## 本地构建替换内核
 

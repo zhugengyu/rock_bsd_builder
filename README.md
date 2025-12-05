@@ -15,6 +15,9 @@ make rock_linux_all
 
 ![build_image](./figs/build_image.png)
 
+![linux_neofetch](./linux/doc/figs/linux_neofetch.png)
+
+- 烧录[Rock Pi N10 固件](https://dl.sd-card-images.johang.se/boots/2025-12-01/boot-rock_pi_n10.bin.gz) 到 SD 或 eMMC 中，编译下面的 FreeBSD/NetBSD 镜像，烧录到另一个介质或者 NVMe 盘
 - 构建 FreeBSD 14.3，通用镜像
 
 ```
@@ -24,6 +27,8 @@ make freebsd_all
 
 - 启动后参考[setup-freebsd](./bsd/doc/setup-freebsd.md)进行设置
 
+![freebsd_neofetch](./bsd/doc/figs/freebsd_neofetch.png)
+
 - 构建 NetBSD 10，通用镜像
 
 ```
@@ -31,3 +36,5 @@ make netbsd_all
 ```
 
 - 启动后参考[setup-netbsd](./bsd/doc/setup-netbsd.md)进行设置
+
+![netbsd_neofetch](./bsd/doc/figs/netbsd_neofetch.png)
