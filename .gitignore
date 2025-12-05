@@ -67,3 +67,5 @@ bsd/netbsd
 
 *.img
 *.tar.xz
+*.itb
+*.bin

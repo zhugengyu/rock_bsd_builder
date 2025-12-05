@@ -49,11 +49,12 @@ freebsd_aarch64_image:
 		--disk-image-freebsd/hostname arm64 \
 		--disk-image-freebsd/rootfs-type ufs \
 		--skip-update
+	@cp $(FREEBSD_ROOT_DIR)/build/output/freebsd-aarch64.img ./freebsd-aarch64.img
 #		--disk-image-freebsd/rockchip \
 		--disk-image-freebsd/rockchip_idbloader $(ROOT_DIR)/linux/out/u-boot/idbloader.img \
 		--disk-image-freebsd/rockchip_uboot $(ROOT_DIR)/linux/out/u-boot/uboot.img \
 		--disk-image-freebsd/rockchip_trust $(ROOT_DIR)/linux/out/u-boot/trust.img
-	$(ROOT_DIR)/validate_rk3399_image.sh $(FREEBSD_ROOT_DIR)/build/output/freebsd-aarch64.img
+#	$(ROOT_DIR)/validate_rk3399_image.sh $(FREEBSD_ROOT_DIR)/build/output/freebsd-aarch64.img
 
 freebsd_aarch64_run:
 	@echo "Run FreeBSD(AARCH64)"

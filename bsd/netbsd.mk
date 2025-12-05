@@ -12,9 +12,9 @@ export HOST_UNAME_S!=  uname -s
 export HOST_UNAME_R!=  uname -r
 export HOST_UNAME_P!=  uname -p
 
-NETBSD_AARCH64_IMAGES := $(NETBSD_ROOT_DIR)/build/releasedir/$(NETBSD_AARCH64_MARCH)-$(NETBSD_AARCH64_ARCH)/binary/gzimg
-NETBSD_AARCH64_KERNELS := $(NETBSD_ROOT_DIR)/build/sys/arch/$(NETBSD_AARCH64_MARCH)/compile
-NETBSD_AARCH64_TOOLS := $(NETBSD_ROOT_DIR)/build/tooldir.$(HOST_UNAME_S)-$(HOST_UNAME_R)-$(HOST_UNAME_P)
+NETBSD_AARCH64_IMAGES := $(NETBSD_ROOT_DIR)/build/netbsd-aarch64-build/releasedir/$(NETBSD_AARCH64_MARCH)-$(NETBSD_AARCH64_ARCH)/binary/gzimg
+NETBSD_AARCH64_KERNELS := $(NETBSD_ROOT_DIR)/build/netbsd-aarch64-build/sys/arch/$(NETBSD_AARCH64_MARCH)/compile
+NETBSD_AARCH64_TOOLS := $(NETBSD_ROOT_DIR)/build/netbsd-aarch64-build/tooldir.$(HOST_UNAME_S)-$(HOST_UNAME_R)-$(HOST_UNAME_P)
 
 netbsd_src_dl:
 	@if [ ! -d $(NETBSD_DIR) ]; then \
