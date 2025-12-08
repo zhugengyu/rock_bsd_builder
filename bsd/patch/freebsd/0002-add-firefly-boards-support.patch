@@ -1,0 +1,6478 @@
+From 785559f5c32f364ff2da9dc633e88b39c37c9f2c Mon Sep 17 00:00:00 2001
+From: zhugengyu <zhugengyu2023@gmail.com>
+Date: Mon, 8 Dec 2025 19:05:53 +0800
+Subject: [PATCH] add firefly boards support
+
+---
+ sys/arm64/arm64/debug_monitor.c               |   68 +
+ sys/arm64/arm64/identcpu.c                    |   13 +
+ sys/arm64/conf/GENERIC                        |    1 +
+ sys/arm64/conf/std.firefly                    |   14 +
+ sys/arm64/firefly/if_gmac.c                   | 1461 +++++++++++
+ sys/arm64/firefly/if_gmac.h                   |  292 +++
+ sys/arm64/firefly/if_gmacvar.h                |  110 +
+ sys/arm64/firefly/if_xmac.c                   | 2311 +++++++++++++++++
+ sys/arm64/firefly/if_xmac_hw.h                |  452 ++++
+ sys/arm64/include/cpu.h                       |   10 +
+ sys/arm64/include/kdb.h                       |    2 +
+ sys/conf/files.arm64                          |    2 +
+ sys/conf/options.arm64                        |    4 +
+ .../src/arm64/firefly/firefly_dsk_v1.dts      |   61 +
+ .../src/arm64/firefly/firefly_dsk_v2.dts      |   75 +
+ .../src/arm64/firefly/firefly_dsk_v2.dtsi     |  108 +
+ .../src/arm64/firefly/firefly_dsk_v3.dts      |   48 +
+ .../src/arm64/firefly/firefly_pi_v2.dts       |   67 +
+ .../src/arm64/firefly/firefly_pi_v2.dtsi      |  108 +
+ .../src/arm64/firefly/firefly_v1.dtsi         |  291 +++
+ .../src/arm64/firefly/firefly_v2.dtsi         |  233 ++
+ .../src/arm64/firefly/firefly_v3.dtsi         |  314 +++
+ sys/dev/mii/mcommphy.c                        |   25 +-
+ sys/dev/mii/miidevs                           |    1 +
+ sys/dev/uart/uart.h                           |    1 +
+ sys/dev/uart/uart_cpu_arm64.c                 |    6 +
+ sys/dev/uart/uart_dev_pl011.c                 |    5 +-
+ sys/dev/uart/uart_subr.c                      |    1 +
+ sys/dev/usb/controller/xhci.c                 |    3 +-
+ sys/gdb/gdb_main.c                            |    6 +
+ sys/modules/dtb/firefly/Makefile              |   11 +
+ 31 files changed, 6094 insertions(+), 10 deletions(-)
+ create mode 100644 sys/arm64/conf/std.firefly
+ create mode 100644 sys/arm64/firefly/if_gmac.c
+ create mode 100644 sys/arm64/firefly/if_gmac.h
+ create mode 100644 sys/arm64/firefly/if_gmacvar.h
+ create mode 100644 sys/arm64/firefly/if_xmac.c
+ create mode 100644 sys/arm64/firefly/if_xmac_hw.h
+ create mode 100644 sys/contrib/device-tree/src/arm64/firefly/firefly_dsk_v1.dts
+ create mode 100644 sys/contrib/device-tree/src/arm64/firefly/firefly_dsk_v2.dts
+ create mode 100644 sys/contrib/device-tree/src/arm64/firefly/firefly_dsk_v2.dtsi
+ create mode 100644 sys/contrib/device-tree/src/arm64/firefly/firefly_dsk_v3.dts
+ create mode 100644 sys/contrib/device-tree/src/arm64/firefly/firefly_pi_v2.dts
+ create mode 100644 sys/contrib/device-tree/src/arm64/firefly/firefly_pi_v2.dtsi
+ create mode 100644 sys/contrib/device-tree/src/arm64/firefly/firefly_v1.dtsi
+ create mode 100644 sys/contrib/device-tree/src/arm64/firefly/firefly_v2.dtsi
+ create mode 100644 sys/contrib/device-tree/src/arm64/firefly/firefly_v3.dtsi
+ create mode 100644 sys/modules/dtb/firefly/Makefile
+
+diff --git a/sys/arm64/arm64/debug_monitor.c b/sys/arm64/arm64/debug_monitor.c
+index f3e4b504f..cc1006aad 100644
+--- a/sys/arm64/arm64/debug_monitor.c
++++ b/sys/arm64/arm64/debug_monitor.c
+@@ -64,6 +64,8 @@ static int dbg_setup_watchpoint(struct debug_monitor_state *, vm_offset_t,
+     vm_size_t, enum dbg_access_t);
+ static int dbg_remove_watchpoint(struct debug_monitor_state *, vm_offset_t,
+     vm_size_t);
++static int dbg_find_free_slot(struct debug_monitor_state *, enum dbg_t);
++static int dbg_find_slot(struct debug_monitor_state *, enum dbg_t, vm_offset_t);
+ 
+ /* Called from the exception handlers */
+ void dbg_monitor_enter(struct thread *);
+@@ -270,6 +272,72 @@ kdb_cpu_clr_watchpoint(vm_offset_t addr, vm_size_t size)
+ 
+ 	return (dbg_remove_watchpoint(NULL, addr, size));
+ }
++
++int
++kdb_cpu_set_hwbreakpoint(vm_offset_t addr, vm_size_t size)
++{
++	uint64_t bcr_size, bcr_priv;
++	int i;
++
++	i = dbg_find_free_slot(&kernel_monitor, DBG_TYPE_BREAKPOINT);
++	if (i == -1) {
++		printf("Can not find slot for breakpoint, max %d"
++		    " breakpoints supported\n", dbg_breakpoint_num);
++		return (EBUSY);
++	}
++
++	switch(size) {
++	case 1:
++		bcr_size = DBG_WATCH_CTRL_LEN_1;
++		break;
++	case 2:
++		bcr_size = DBG_WATCH_CTRL_LEN_2;
++		break;
++	case 4:
++		bcr_size = DBG_WATCH_CTRL_LEN_4;
++		break;
++	case 8:
++		bcr_size = DBG_WATCH_CTRL_LEN_8;
++		break;
++	default:
++		printf("Unsupported address size for breakpoint: %zu", size);
++		return (EINVAL);
++	}
++
++	bcr_priv = DBG_WB_CTRL_EL1;
++
++	kernel_monitor.dbg_bvr[i] = addr;
++	/* E, bit[0]: Enable breakpoint n, 1
++	   PMC, bit[2:1]: Privilege mode control, EL1
++	   BAS, bit[12:5]: Byte address select*/
++	kernel_monitor.dbg_bcr[i] = bcr_size | bcr_priv | DBG_WB_CTRL_E;
++	kernel_monitor.dbg_enable_count++;
++	kernel_monitor.dbg_flags |= DBGMON_ENABLED;
++
++	dbg_register_sync(&kernel_monitor);
++	return (0);
++}
++
++int
++kdb_cpu_clr_hwbreakpoint(vm_offset_t addr, vm_size_t size)
++{
++	int i;
++
++	i = dbg_find_slot(&kernel_monitor, DBG_TYPE_BREAKPOINT, addr);
++	if (i == -1) {
++		printf("Can not find breakpoint for address 0%lx\n", addr);
++		return (EINVAL);
++	}
++
++	kernel_monitor.dbg_bvr[i] = 0;
++	kernel_monitor.dbg_bcr[i] = 0;
++	kernel_monitor.dbg_enable_count--;
++	if (kernel_monitor.dbg_enable_count == 0)
++		kernel_monitor.dbg_flags &= ~DBGMON_ENABLED;
++
++	dbg_register_sync(&kernel_monitor);
++	return (0);
++}
+ #endif /* DDB || GDB */
+ 
+ #ifdef DDB
+diff --git a/sys/arm64/arm64/identcpu.c b/sys/arm64/arm64/identcpu.c
+index d0b4f74c8..b513b0133 100644
+--- a/sys/arm64/arm64/identcpu.c
++++ b/sys/arm64/arm64/identcpu.c
+@@ -264,6 +264,18 @@ static const struct cpu_parts cpu_parts_apple[] = {
+ 	CPU_PART_NONE,
+ };
+ 
++/* Firefly */
++static const struct cpu_parts cpu_parts_firefly[] = {
++	{ CPU_PART_FIREFLY_F310, "F310"},
++	{ CPU_PART_FIREFLY_F660, "F660"},
++	{ CPU_PART_FIREFLY_F661, "F661"},
++	{ CPU_PART_FIREFLY_F662, "F662"},
++	{ CPU_PART_FIREFLY_F663, "F663"},
++	{ CPU_PART_FIREFLY_F664, "F664"},
++	{ CPU_PART_FIREFLY_F862, "F862"},
++	CPU_PART_NONE,
++};
++
+ /* Unknown */
+ static const struct cpu_parts cpu_parts_none[] = {
+ 	CPU_PART_NONE,
+@@ -287,6 +299,7 @@ const struct cpu_implementers cpu_implementers[] = {
+ 	{ CPU_IMPL_MARVELL,	"Marvell",	cpu_parts_none },
+ 	{ CPU_IMPL_NVIDIA,	"NVIDIA",	cpu_parts_none },
+ 	{ CPU_IMPL_QUALCOMM,	"Qualcomm",	cpu_parts_qcom },
++	{ CPU_IMPL_FIREFLY,	"Firefly",	cpu_parts_firefly },
+ 	CPU_IMPLEMENTER_NONE,
+ };
+ 
+diff --git a/sys/arm64/conf/GENERIC b/sys/arm64/conf/GENERIC
+index 2267429f1..909e0da79 100644
+--- a/sys/arm64/conf/GENERIC
++++ b/sys/arm64/conf/GENERIC
+@@ -43,3 +43,4 @@ include		"std.qcom"
+ include		"std.rockchip"
+ include		"std.virt"
+ include		"std.xilinx"
++include     "std.firefly"
+diff --git a/sys/arm64/conf/std.firefly b/sys/arm64/conf/std.firefly
+new file mode 100644
+index 000000000..f31d81457
+--- /dev/null
++++ b/sys/arm64/conf/std.firefly
+@@ -0,0 +1,14 @@
++#
++# Firefly SoC support
++#
++
++# SoC support
++options 	SOC_FIREFLY_V1
++options 	SOC_FIREFLY_V2
++options 	SOC_FIREFLY_V3
++
++nooptions 	PCI_HP			# PCI-Express native HotPlug
++nooptions 	PCI_IOV			# PCI SR-IOV support
++
++# DTBs
++makeoptions	MODULES_EXTRA+="dtb/firefly"
+diff --git a/sys/arm64/firefly/if_gmac.c b/sys/arm64/firefly/if_gmac.c
+new file mode 100644
+index 000000000..cf6cb037c
+--- /dev/null
++++ b/sys/arm64/firefly/if_gmac.c
+@@ -0,0 +1,1461 @@
++/*-
++ * Copyright (c) 2014 Ruslan Bukin <br@bsdpad.com>
++ * All rights reserved.
++ *
++ * This software was developed by SRI International and the University of
++ * Cambridge Computer Laboratory under DARPA/AFRL contract (FA8750-10-C-0237)
++ * ("CTSRD"), as part of the DARPA CRASH research programme.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
++ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
++ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
++ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
++ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ */
++
++/*
++ * Ethernet media access controller (EMAC)
++ * Chapter 17, Altera Cyclone V Device Handbook (CV-5V2 2014.07.22)
++ *
++ * EMAC is an instance of the Synopsys DesignWare 3504-0
++ * Universal 10/100/1000 Ethernet MAC (DWC_gmac).
++ */
++#ifdef __rtems__
++#include <machine/rtems-bsd-kernel-space.h>
++#endif /* __rtems__ */
++
++#include <sys/cdefs.h>
++__FBSDID("$FreeBSD$");
++
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <sys/bus.h>
++#include <sys/gpio.h>
++#include <sys/kernel.h>
++#include <sys/lock.h>
++#include <sys/malloc.h>
++#include <sys/mbuf.h>
++#include <sys/module.h>
++#include <sys/mutex.h>
++#include <sys/rman.h>
++#include <sys/socket.h>
++#include <sys/sockio.h>
++
++#include <net/bpf.h>
++#include <net/if.h>
++#include <net/ethernet.h>
++#include <net/if_dl.h>
++#include <net/if_media.h>
++#include <net/if_types.h>
++#include <net/if_var.h>
++
++#include <machine/bus.h>
++
++#ifdef __rtems__
++#include "if_gmac.h"
++#include "if_gmacvar.h"
++#else
++#include <arm64/firefly/if_gmac.h>
++#include <arm64/firefly/if_gmacvar.h>
++#endif
++#include <dev/mii/mii.h>
++#include <dev/mii/miivar.h>
++#include <dev/ofw/ofw_bus.h>
++#include <dev/ofw/ofw_bus_subr.h>
++
++#ifdef EXT_RESOURCES
++#include <dev/extres/clk/clk.h>
++#include <dev/extres/hwreset/hwreset.h>
++#endif
++
++#ifdef __rtems__
++#include <rtems/bsd/local/gpio_if.h>
++#include <rtems/bsd/local/miibus_if.h>
++#else
++#include "gpio_if.h"
++#include "miibus_if.h"
++#endif
++
++#define	READ4(_sc, _reg) \
++	bus_read_4((_sc)->res[0], _reg)
++#define	WRITE4(_sc, _reg, _val) \
++	bus_write_4((_sc)->res[0], _reg, _val)
++
++#define	MAC_RESET_TIMEOUT	100
++#define	WATCHDOG_TIMEOUT_SECS	5
++#define	STATS_HARVEST_INTERVAL	2
++
++#define	DWC_LOCK(sc)			mtx_lock(&(sc)->mtx)
++#define	DWC_UNLOCK(sc)			mtx_unlock(&(sc)->mtx)
++#define	DWC_ASSERT_LOCKED(sc)		mtx_assert(&(sc)->mtx, MA_OWNED)
++#define	DWC_ASSERT_UNLOCKED(sc)		mtx_assert(&(sc)->mtx, MA_NOTOWNED)
++
++#define	DDESC_TDES0_OWN			(1U << 31)
++#define	DDESC_TDES0_TXINT		(1U << 30)
++#define	DDESC_TDES0_TXLAST		(1U << 29)
++#define	DDESC_TDES0_TXFIRST		(1U << 28)
++#define	DDESC_TDES0_TXCRCDIS		(1U << 27)
++#define	DDESC_TDES0_TXRINGEND		(1U << 21)
++#define	DDESC_TDES0_TXCHAIN		(1U << 20)
++
++#define	DDESC_RDES0_OWN			(1U << 31)
++#define	DDESC_RDES0_FL_MASK		0x3fff
++#define	DDESC_RDES0_FL_SHIFT		16	/* Frame Length */
++#define	DDESC_RDES1_CHAINED		(1U << 14)
++
++/* Alt descriptor bits. */
++#define	DDESC_CNTL_TXINT		(1U << 31)
++#define	DDESC_CNTL_TXLAST		(1U << 30)
++#define	DDESC_CNTL_TXFIRST		(1U << 29)
++#define	DDESC_CNTL_TXCRCDIS		(1U << 26)
++#define	DDESC_CNTL_TXRINGEND		(1U << 25)
++#define	DDESC_CNTL_TXCHAIN		(1U << 24)
++
++#define	DDESC_CNTL_CHAINED		(1U << 24)
++
++/*
++ * A hardware buffer descriptor.  Rx and Tx buffers have the same descriptor
++ * layout, but the bits in the fields have different meanings.
++ */
++struct dwc_hwdesc
++{
++	uint32_t tdes0;		/* status for alt layout */
++	uint32_t tdes1;		/* cntl for alt layout */
++	uint32_t addr;		/* pointer to buffer data */
++	uint32_t addr_next;	/* link to next descriptor */
++};
++
++/*
++ * The hardware imposes alignment restrictions on various objects involved in
++ * DMA transfers.  These values are expressed in bytes (not bits).
++ */
++#define	DWC_DESC_RING_ALIGN		2048
++
++static struct resource_spec dwc_spec[] = {
++	{ SYS_RES_MEMORY,	0,	RF_ACTIVE },
++	{ SYS_RES_IRQ,		0,	RF_ACTIVE },
++	{ -1, 0 }
++};
++
++static void dwc_txfinish_locked(struct dwc_softc *sc);
++static void dwc_rxfinish_locked(struct dwc_softc *sc);
++static void dwc_stop_locked(struct dwc_softc *sc);
++static void dwc_setup_rxfilter(struct dwc_softc *sc);
++
++static inline uint32_t
++next_rxidx(struct dwc_softc *sc, uint32_t curidx)
++{
++
++	return ((curidx + 1) % RX_DESC_COUNT);
++}
++
++static inline uint32_t
++next_txidx(struct dwc_softc *sc, uint32_t curidx)
++{
++
++	return ((curidx + 1) % TX_DESC_COUNT);
++}
++
++#ifndef __rtems__
++static void
++dwc_get1paddr(void *arg, bus_dma_segment_t *segs, int nsegs, int error)
++{
++
++	if (error != 0)
++		return;
++	*(bus_addr_t *)arg = segs[0].ds_addr;
++}
++#endif
++
++inline static uint32_t
++dwc_setup_txdesc(struct dwc_softc *sc, int idx, bus_addr_t paddr,
++    uint32_t len)
++{
++	uint32_t flags;
++	uint32_t nidx;
++
++	nidx = next_txidx(sc, idx);
++
++	/* Addr/len 0 means we're clearing the descriptor after xmit done. */
++	if (paddr == 0 || len == 0) {
++		flags = 0;
++		--sc->txcount;
++	} else {
++		if (sc->mactype == DWC_GMAC_ALT_DESC)
++			flags = DDESC_CNTL_TXCHAIN | DDESC_CNTL_TXFIRST
++			    | DDESC_CNTL_TXLAST | DDESC_CNTL_TXINT;
++		else
++			flags = DDESC_TDES0_TXCHAIN | DDESC_TDES0_TXFIRST
++			    | DDESC_TDES0_TXLAST | DDESC_TDES0_TXINT;
++		++sc->txcount;
++	}
++
++	sc->txdesc_ring[idx].addr = (uint32_t)(paddr);
++	if (sc->mactype == DWC_GMAC_ALT_DESC) {
++		sc->txdesc_ring[idx].tdes0 = 0;
++		sc->txdesc_ring[idx].tdes1 = flags | len;
++	} else {
++		sc->txdesc_ring[idx].tdes0 = flags;
++		sc->txdesc_ring[idx].tdes1 = len;
++	}
++
++	if (paddr && len) {
++		wmb();
++		sc->txdesc_ring[idx].tdes0 |= DDESC_TDES0_OWN;
++		wmb();
++	}
++
++	return (nidx);
++}
++
++static int
++dwc_setup_txbuf(struct dwc_softc *sc, int idx, struct mbuf **mp)
++{
++	struct bus_dma_segment seg;
++	int error, nsegs;
++	struct mbuf * m;
++
++	if ((m = m_defrag(*mp, M_NOWAIT)) == NULL)
++		return (ENOMEM);
++	*mp = m;
++
++#ifndef __rtems__
++	error = bus_dmamap_load_mbuf_sg(sc->txbuf_tag, sc->txbuf_map[idx].map,
++		m, &seg, &nsegs, 0);
++	if (error != 0) {
++		return (ENOMEM);
++	}
++#else /* __rtems__ */
++	if (m->m_len > 0) {
++		seg.ds_addr = mtod(m, bus_addr_t);
++		seg.ds_len = m->m_len;
++		nsegs = 1;
++		rtems_cache_flush_multiple_data_lines(m->m_data, m->m_len);
++	}
++#endif /* __rtems__ */
++
++	KASSERT(nsegs == 1, ("%s: %d segments returned!", __func__, nsegs));
++
++#ifndef __rtems__
++	bus_dmamap_sync(sc->txbuf_tag, sc->txbuf_map[idx].map,
++	    BUS_DMASYNC_PREWRITE);
++#else /* __rtems__ */
++	wmb();
++#endif /* __rtems__ */
++
++	sc->txbuf_map[idx].mbuf = m;
++
++	dwc_setup_txdesc(sc, idx, seg.ds_addr, seg.ds_len);
++
++	return (0);
++}
++
++static void
++dwc_txstart_locked(struct dwc_softc *sc)
++{
++	struct ifnet *ifp;
++	struct mbuf *m;
++	int enqueued;
++
++	DWC_ASSERT_LOCKED(sc);
++
++	if (!sc->link_is_up)
++		return;
++
++	ifp = sc->ifp;
++
++	if (ifp->if_drv_flags & IFF_DRV_OACTIVE) {
++		return;
++	}
++
++	enqueued = 0;
++
++	for (;;) {
++		if (sc->txcount == (TX_DESC_COUNT-1)) {
++			ifp->if_drv_flags |= IFF_DRV_OACTIVE;
++			break;
++		}
++
++		IFQ_DRV_DEQUEUE(&ifp->if_snd, m);
++		if (m == NULL)
++			break;
++		if (dwc_setup_txbuf(sc, sc->tx_idx_head, &m) != 0) {
++			IFQ_DRV_PREPEND(&ifp->if_snd, m);
++			break;
++		}
++		BPF_MTAP(ifp, m);
++		sc->tx_idx_head = next_txidx(sc, sc->tx_idx_head);
++		++enqueued;
++	}
++
++	if (enqueued != 0) {
++		WRITE4(sc, TRANSMIT_POLL_DEMAND, 0x1);
++		sc->tx_watchdog_count = WATCHDOG_TIMEOUT_SECS;
++	}
++}
++
++static void
++dwc_txstart(struct ifnet *ifp)
++{
++	struct dwc_softc *sc = ifp->if_softc;
++
++	DWC_LOCK(sc);
++	dwc_txstart_locked(sc);
++	DWC_UNLOCK(sc);
++}
++
++static void
++dwc_stop_locked(struct dwc_softc *sc)
++{
++	struct ifnet *ifp;
++	uint32_t reg;
++
++	DWC_ASSERT_LOCKED(sc);
++
++	ifp = sc->ifp;
++	ifp->if_drv_flags &= ~(IFF_DRV_RUNNING | IFF_DRV_OACTIVE);
++	sc->tx_watchdog_count = 0;
++	sc->stats_harvest_count = 0;
++
++	callout_stop(&sc->dwc_callout);
++
++	/* Stop DMA TX */
++	reg = READ4(sc, OPERATION_MODE);
++	reg &= ~(MODE_ST);
++	WRITE4(sc, OPERATION_MODE, reg);
++
++	/* Flush TX */
++	reg = READ4(sc, OPERATION_MODE);
++	reg |= (MODE_FTF);
++	WRITE4(sc, OPERATION_MODE, reg);
++
++	/* Stop transmitters */
++	reg = READ4(sc, MAC_CONFIGURATION);
++	reg &= ~(CONF_TE | CONF_RE);
++	WRITE4(sc, MAC_CONFIGURATION, reg);
++
++	/* Stop DMA RX */
++	reg = READ4(sc, OPERATION_MODE);
++	reg &= ~(MODE_SR);
++	WRITE4(sc, OPERATION_MODE, reg);
++}
++
++static void dwc_clear_stats(struct dwc_softc *sc)
++{
++	uint32_t reg;
++
++	reg = READ4(sc, MMC_CONTROL);
++	reg |= (MMC_CONTROL_CNTRST);
++	WRITE4(sc, MMC_CONTROL, reg);
++}
++
++static void
++dwc_harvest_stats(struct dwc_softc *sc)
++{
++	struct ifnet *ifp;
++
++	/* We don't need to harvest too often. */
++	if (++sc->stats_harvest_count < STATS_HARVEST_INTERVAL)
++		return;
++
++	sc->stats_harvest_count = 0;
++	ifp = sc->ifp;
++
++	if_inc_counter(ifp, IFCOUNTER_IPACKETS, READ4(sc, RXFRAMECOUNT_GB));
++	if_inc_counter(ifp, IFCOUNTER_IMCASTS, READ4(sc, RXMULTICASTFRAMES_G));
++	if_inc_counter(ifp, IFCOUNTER_IERRORS,
++	    READ4(sc, RXOVERSIZE_G) + READ4(sc, RXUNDERSIZE_G) +
++	    READ4(sc, RXCRCERROR) + READ4(sc, RXALIGNMENTERROR) +
++	    READ4(sc, RXRUNTERROR) + READ4(sc, RXJABBERERROR) +
++	    READ4(sc, RXLENGTHERROR));
++
++	if_inc_counter(ifp, IFCOUNTER_OPACKETS, READ4(sc, TXFRAMECOUNT_G));
++	if_inc_counter(ifp, IFCOUNTER_OMCASTS, READ4(sc, TXMULTICASTFRAMES_G));
++	if_inc_counter(ifp, IFCOUNTER_OERRORS,
++	    READ4(sc, TXOVERSIZE_G) + READ4(sc, TXEXCESSDEF) +
++	    READ4(sc, TXCARRIERERR) + READ4(sc, TXUNDERFLOWERROR));
++
++	if_inc_counter(ifp, IFCOUNTER_COLLISIONS,
++	    READ4(sc, TXEXESSCOL) + READ4(sc, TXLATECOL));
++
++	dwc_clear_stats(sc);
++}
++
++static void
++dwc_tick(void *arg)
++{
++	struct dwc_softc *sc;
++	struct ifnet *ifp;
++	int link_was_up;
++
++	sc = arg;
++
++	DWC_ASSERT_LOCKED(sc);
++
++	ifp = sc->ifp;
++
++	if (!(ifp->if_drv_flags & IFF_DRV_RUNNING))
++	    return;
++
++	/*
++	 * Typical tx watchdog.  If this fires it indicates that we enqueued
++	 * packets for output and never got a txdone interrupt for them.  Maybe
++	 * it's a missed interrupt somehow, just pretend we got one.
++	 */
++	if (sc->tx_watchdog_count > 0) {
++		if (--sc->tx_watchdog_count == 0) {
++			dwc_txfinish_locked(sc);
++		}
++	}
++
++	/* Gather stats from hardware counters. */
++	dwc_harvest_stats(sc);
++
++	/* Check the media status. */
++	link_was_up = sc->link_is_up;
++	mii_tick(sc->mii_softc);
++	if (sc->link_is_up && !link_was_up)
++		dwc_txstart_locked(sc);
++
++	/* Schedule another check one second from now. */
++	callout_reset(&sc->dwc_callout, hz, dwc_tick, sc);
++}
++
++static void
++dwc_init_locked(struct dwc_softc *sc)
++{
++	struct ifnet *ifp = sc->ifp;
++	uint32_t reg;
++
++	DWC_ASSERT_LOCKED(sc);
++
++	if (ifp->if_drv_flags & IFF_DRV_RUNNING)
++		return;
++
++	ifp->if_drv_flags |= IFF_DRV_RUNNING;
++
++	dwc_setup_rxfilter(sc);
++
++	/* Initializa DMA and enable transmitters */
++	reg = READ4(sc, OPERATION_MODE);
++	reg |= (MODE_TSF | MODE_OSF | MODE_FUF);
++	reg &= ~(MODE_RSF);
++	reg |= (MODE_RTC_LEV32 << MODE_RTC_SHIFT);
++	WRITE4(sc, OPERATION_MODE, reg);
++
++	WRITE4(sc, INTERRUPT_ENABLE, INT_EN_DEFAULT);
++
++	/* Start DMA */
++	reg = READ4(sc, OPERATION_MODE);
++	reg |= (MODE_ST | MODE_SR);
++	WRITE4(sc, OPERATION_MODE, reg);
++
++	/* Enable transmitters */
++	reg = READ4(sc, MAC_CONFIGURATION);
++	reg |= (CONF_JD | CONF_ACS | CONF_BE);
++	reg |= (CONF_TE | CONF_RE);
++	WRITE4(sc, MAC_CONFIGURATION, reg);
++
++	/*
++	 * Call mii_mediachg() which will call back into dwc_miibus_statchg()
++	 * to set up the remaining config registers based on current media.
++	 */
++	mii_mediachg(sc->mii_softc);
++	callout_reset(&sc->dwc_callout, hz, dwc_tick, sc);
++}
++
++static void
++dwc_init(void *if_softc)
++{
++	struct dwc_softc *sc = if_softc;
++
++	DWC_LOCK(sc);
++	dwc_init_locked(sc);
++	DWC_UNLOCK(sc);
++}
++
++inline static uint32_t
++dwc_setup_rxdesc(struct dwc_softc *sc, int idx, bus_addr_t paddr)
++{
++	uint32_t nidx;
++
++	sc->rxdesc_ring[idx].addr = (uint32_t)paddr;
++	nidx = next_rxidx(sc, idx);
++#ifndef __rtems__
++	sc->rxdesc_ring[idx].addr_next = sc->rxdesc_ring_paddr +	\
++	    (nidx * sizeof(struct dwc_hwdesc));
++#else /* __rtems__ */
++	sc->rxdesc_ring[idx].addr_next = (uint32_t)(uintptr_t)&sc->rxdesc_ring[nidx];
++#endif /* __rtems__ */
++	if (sc->mactype == DWC_GMAC_ALT_DESC)
++		sc->rxdesc_ring[idx].tdes1 = DDESC_CNTL_CHAINED | RX_MAX_PACKET;
++	else
++		sc->rxdesc_ring[idx].tdes1 = DDESC_RDES1_CHAINED | MCLBYTES;
++
++	wmb();
++	sc->rxdesc_ring[idx].tdes0 = DDESC_RDES0_OWN;
++	wmb();
++
++	return (nidx);
++}
++
++static int
++dwc_setup_rxbuf(struct dwc_softc *sc, int idx, struct mbuf *m)
++{
++	struct bus_dma_segment seg;
++#ifndef __rtems__
++	int error, nsegs;
++#endif /* __rtems__ */
++
++	m_adj(m, ETHER_ALIGN);
++
++#ifndef __rtems__
++	error = bus_dmamap_load_mbuf_sg(sc->rxbuf_tag, sc->rxbuf_map[idx].map,
++	    m, &seg, &nsegs, 0);
++	if (error != 0) {
++		return (error);
++	}
++
++	KASSERT(nsegs == 1, ("%s: %d segments returned!", __func__, nsegs));
++
++	bus_dmamap_sync(sc->rxbuf_tag, sc->rxbuf_map[idx].map,
++	    BUS_DMASYNC_PREREAD);
++#else /* __rtems__ */
++	rtems_cache_invalidate_multiple_data_lines(m->m_data, m->m_len);
++	seg.ds_addr = mtod(m, bus_addr_t);
++	seg.ds_len = m->m_len;
++#endif /* __rtems__ */
++
++	sc->rxbuf_map[idx].mbuf = m;
++	dwc_setup_rxdesc(sc, idx, seg.ds_addr);
++
++	return (0);
++}
++
++static struct mbuf *
++dwc_alloc_mbufcl(struct dwc_softc *sc)
++{
++	struct mbuf *m;
++
++	m = m_getcl(M_NOWAIT, MT_DATA, M_PKTHDR);
++	if (m != NULL)
++		m->m_pkthdr.len = m->m_len = m->m_ext.ext_size;
++
++	return (m);
++}
++
++static void
++dwc_media_status(struct ifnet * ifp, struct ifmediareq *ifmr)
++{
++	struct dwc_softc *sc;
++	struct mii_data *mii;
++
++	sc = ifp->if_softc;
++	mii = sc->mii_softc;
++	DWC_LOCK(sc);
++	mii_pollstat(mii);
++	ifmr->ifm_active = mii->mii_media_active;
++	ifmr->ifm_status = mii->mii_media_status;
++	DWC_UNLOCK(sc);
++}
++
++static int
++dwc_media_change_locked(struct dwc_softc *sc)
++{
++
++	return (mii_mediachg(sc->mii_softc));
++}
++
++static int
++dwc_media_change(struct ifnet * ifp)
++{
++	struct dwc_softc *sc;
++	int error;
++
++	sc = ifp->if_softc;
++
++	DWC_LOCK(sc);
++	error = dwc_media_change_locked(sc);
++	DWC_UNLOCK(sc);
++	return (error);
++}
++
++static const uint8_t nibbletab[] = {
++	/* 0x0 0000 -> 0000 */  0x0,
++	/* 0x1 0001 -> 1000 */  0x8,
++	/* 0x2 0010 -> 0100 */  0x4,
++	/* 0x3 0011 -> 1100 */  0xc,
++	/* 0x4 0100 -> 0010 */  0x2,
++	/* 0x5 0101 -> 1010 */  0xa,
++	/* 0x6 0110 -> 0110 */  0x6,
++	/* 0x7 0111 -> 1110 */  0xe,
++	/* 0x8 1000 -> 0001 */  0x1,
++	/* 0x9 1001 -> 1001 */  0x9,
++	/* 0xa 1010 -> 0101 */  0x5,
++	/* 0xb 1011 -> 1101 */  0xd,
++	/* 0xc 1100 -> 0011 */  0x3,
++	/* 0xd 1101 -> 1011 */  0xb,
++	/* 0xe 1110 -> 0111 */  0x7,
++	/* 0xf 1111 -> 1111 */  0xf, };
++
++static uint8_t
++bitreverse(uint8_t x)
++{
++
++	return (nibbletab[x & 0xf] << 4) | nibbletab[x >> 4];
++}
++
++static void
++dwc_setup_rxfilter(struct dwc_softc *sc)
++{
++	struct ifmultiaddr *ifma;
++	struct ifnet *ifp;
++	uint8_t *eaddr, val;
++	uint32_t crc, ffval, hashbit, hashreg, hi, lo, hash[8];
++	int nhash, i;
++
++	DWC_ASSERT_LOCKED(sc);
++
++	ifp = sc->ifp;
++	nhash = sc->mactype == DWC_GMAC_ALT_DESC ? 2 : 8;
++
++	/*
++	 * Set the multicast (group) filter hash.
++	 */
++	if ((ifp->if_flags & IFF_ALLMULTI) != 0) {
++		ffval = (FRAME_FILTER_PM);
++		for (i = 0; i < nhash; i++)
++			hash[i] = ~0;
++	} else {
++		ffval = (FRAME_FILTER_HMC);
++		for (i = 0; i < nhash; i++)
++			hash[i] = 0;
++		/* if_maddr_rlock(ifp); */
++		CK_STAILQ_FOREACH(ifma, &sc->ifp->if_multiaddrs, ifma_link) {
++			if (ifma->ifma_addr->sa_family != AF_LINK)
++				continue;
++			crc = ether_crc32_le(LLADDR((struct sockaddr_dl *)
++				ifma->ifma_addr), ETHER_ADDR_LEN);
++
++			/* Take lower 8 bits and reverse it */
++			val = bitreverse(~crc & 0xff);
++			if (sc->mactype == DWC_GMAC_ALT_DESC)
++				val >>= nhash; /* Only need lower 6 bits */
++			hashreg = (val >> 5);
++			hashbit = (val & 31);
++			hash[hashreg] |= (1 << hashbit);
++		}
++		/* if_maddr_runlock(ifp); */
++	}
++
++	/*
++	 * Set the individual address filter hash.
++	 */
++	if (ifp->if_flags & IFF_PROMISC)
++		ffval |= (FRAME_FILTER_PR);
++
++	/*
++	 * Set the primary address.
++	 */
++	eaddr = IF_LLADDR(ifp);
++	lo = eaddr[0] | (eaddr[1] << 8) | (eaddr[2] << 16) |
++	    (eaddr[3] << 24);
++	hi = eaddr[4] | (eaddr[5] << 8);
++	WRITE4(sc, MAC_ADDRESS_LOW(0), lo);
++	WRITE4(sc, MAC_ADDRESS_HIGH(0), hi);
++	WRITE4(sc, MAC_FRAME_FILTER, ffval);
++	if (sc->mactype == DWC_GMAC_ALT_DESC) {
++		WRITE4(sc, GMAC_MAC_HTLOW, hash[0]);
++		WRITE4(sc, GMAC_MAC_HTHIGH, hash[1]);
++	} else {
++		for (i = 0; i < nhash; i++)
++			WRITE4(sc, HASH_TABLE_REG(i), hash[i]);
++	}
++}
++
++static int
++dwc_ioctl(struct ifnet *ifp, u_long cmd, caddr_t data)
++{
++	struct dwc_softc *sc;
++	struct mii_data *mii;
++	struct ifreq *ifr;
++	int mask, error;
++
++	sc = ifp->if_softc;
++	ifr = (struct ifreq *)data;
++
++	error = 0;
++	switch (cmd) {
++	case SIOCSIFFLAGS:
++		DWC_LOCK(sc);
++		if (ifp->if_flags & IFF_UP) {
++			if (ifp->if_drv_flags & IFF_DRV_RUNNING) {
++				if ((ifp->if_flags ^ sc->if_flags) &
++				    (IFF_PROMISC | IFF_ALLMULTI))
++					dwc_setup_rxfilter(sc);
++			} else {
++				if (!sc->is_detaching)
++					dwc_init_locked(sc);
++			}
++		} else {
++			if (ifp->if_drv_flags & IFF_DRV_RUNNING)
++				dwc_stop_locked(sc);
++		}
++		sc->if_flags = ifp->if_flags;
++		DWC_UNLOCK(sc);
++		break;
++	case SIOCADDMULTI:
++	case SIOCDELMULTI:
++		if (ifp->if_drv_flags & IFF_DRV_RUNNING) {
++			DWC_LOCK(sc);
++			dwc_setup_rxfilter(sc);
++			DWC_UNLOCK(sc);
++		}
++		break;
++	case SIOCSIFMEDIA:
++	case SIOCGIFMEDIA:
++		mii = sc->mii_softc;
++		error = ifmedia_ioctl(ifp, ifr, &mii->mii_media, cmd);
++		break;
++	case SIOCSIFCAP:
++		mask = ifp->if_capenable ^ ifr->ifr_reqcap;
++		if (mask & IFCAP_VLAN_MTU) {
++			/* No work to do except acknowledge the change took */
++			ifp->if_capenable ^= IFCAP_VLAN_MTU;
++		}
++		break;
++
++	default:
++		error = ether_ioctl(ifp, cmd, data);
++		break;
++	}
++
++	return (error);
++}
++
++static void
++dwc_txfinish_locked(struct dwc_softc *sc)
++{
++	struct dwc_bufmap *bmap;
++	struct dwc_hwdesc *desc;
++	struct ifnet *ifp;
++
++	DWC_ASSERT_LOCKED(sc);
++
++	ifp = sc->ifp;
++	while (sc->tx_idx_tail != sc->tx_idx_head) {
++		desc = &sc->txdesc_ring[sc->tx_idx_tail];
++		if ((desc->tdes0 & DDESC_TDES0_OWN) != 0)
++			break;
++		bmap = &sc->txbuf_map[sc->tx_idx_tail];
++#ifndef __rtems__
++		bus_dmamap_sync(sc->txbuf_tag, bmap->map,
++		    BUS_DMASYNC_POSTWRITE);
++		bus_dmamap_unload(sc->txbuf_tag, bmap->map);
++#else
++		wmb();
++#endif /* __rtems__ */
++		m_freem(bmap->mbuf);
++		bmap->mbuf = NULL;
++		dwc_setup_txdesc(sc, sc->tx_idx_tail, 0, 0);
++		sc->tx_idx_tail = next_txidx(sc, sc->tx_idx_tail);
++		ifp->if_drv_flags &= ~IFF_DRV_OACTIVE;
++		if_inc_counter(ifp, IFCOUNTER_OPACKETS, 1);
++	}
++
++	/* If there are no buffers outstanding, muzzle the watchdog. */
++	if (sc->tx_idx_tail == sc->tx_idx_head) {
++		sc->tx_watchdog_count = 0;
++	}
++}
++
++static void
++dwc_rxfinish_locked(struct dwc_softc *sc)
++{
++	struct ifnet *ifp;
++	struct mbuf *m0;
++	struct mbuf *m;
++	int error, idx, len;
++	uint32_t rdes0;
++
++	ifp = sc->ifp;
++
++	for (;;) {
++		idx = sc->rx_idx;
++
++		rdes0 = sc->rxdesc_ring[idx].tdes0;
++		if ((rdes0 & DDESC_RDES0_OWN) != 0)
++			break;
++
++#ifndef __rtems__
++		bus_dmamap_sync(sc->rxbuf_tag, sc->rxbuf_map[idx].map,
++		    BUS_DMASYNC_POSTREAD);
++		bus_dmamap_unload(sc->rxbuf_tag, sc->rxbuf_map[idx].map);
++#else /* __rtems__ */
++		wmb();
++#endif /* __rtems__ */
++
++		len = (rdes0 >> DDESC_RDES0_FL_SHIFT) & DDESC_RDES0_FL_MASK;
++		if (len != 0) {
++			m = sc->rxbuf_map[idx].mbuf;
++			m->m_pkthdr.rcvif = ifp;
++			m->m_pkthdr.len = len;
++			m->m_len = len;
++			if_inc_counter(ifp, IFCOUNTER_IPACKETS, 1);
++
++			/* Remove trailing FCS */
++			m_adj(m, -ETHER_CRC_LEN);
++
++#ifdef __rtems__
++			rtems_cache_invalidate_multiple_data_lines(m->m_data, m->m_len);
++#endif /* __rtems__ */
++			DWC_UNLOCK(sc);
++			(*ifp->if_input)(ifp, m);
++			DWC_LOCK(sc);
++		} else {
++			/* XXX Zero-length packet ? */
++		}
++
++		if ((m0 = dwc_alloc_mbufcl(sc)) != NULL) {
++			if ((error = dwc_setup_rxbuf(sc, idx, m0)) != 0) {
++				/*
++				 * XXX Now what?
++				 * We've got a hole in the rx ring.
++				 */
++			}
++		} else
++			if_inc_counter(sc->ifp, IFCOUNTER_IQDROPS, 1);
++
++		sc->rx_idx = next_rxidx(sc, sc->rx_idx);
++	}
++}
++
++static void
++dwc_intr(void *arg)
++{
++	struct dwc_softc *sc;
++	uint32_t reg;
++
++	sc = arg;
++
++	DWC_LOCK(sc);
++
++	reg = READ4(sc, INTERRUPT_STATUS);
++	if (reg)
++		READ4(sc, SGMII_RGMII_SMII_CTRL_STATUS);
++
++	reg = READ4(sc, DMA_STATUS);
++	if (reg & DMA_STATUS_NIS) {
++		if (reg & DMA_STATUS_RI)
++			dwc_rxfinish_locked(sc);
++
++		if (reg & DMA_STATUS_TI) {
++			dwc_txfinish_locked(sc);
++			dwc_txstart_locked(sc);
++		}
++	}
++
++	if (reg & DMA_STATUS_AIS) {
++		if (reg & DMA_STATUS_FBI) {
++			/* Fatal bus error */
++			device_printf(sc->dev,
++			    "Ethernet DMA error, restarting controller.\n");
++			dwc_stop_locked(sc);
++			dwc_init_locked(sc);
++		}
++	}
++
++	WRITE4(sc, DMA_STATUS, reg & DMA_STATUS_INTR_MASK);
++	DWC_UNLOCK(sc);
++}
++
++static int
++setup_dma(struct dwc_softc *sc)
++{
++	struct mbuf *m;
++	int error;
++	int nidx;
++	int idx;
++
++	/*
++	 * Set up TX descriptor ring, descriptors, and dma maps.
++	 */
++	error = bus_dma_tag_create(
++	    bus_get_dma_tag(sc->dev),	/* Parent tag. */
++	    DWC_DESC_RING_ALIGN, 0,	/* alignment, boundary */
++	    BUS_SPACE_MAXADDR_32BIT,	/* lowaddr */
++	    BUS_SPACE_MAXADDR,		/* highaddr */
++	    NULL, NULL,			/* filter, filterarg */
++	    TX_DESC_SIZE, 1, 		/* maxsize, nsegments */
++	    TX_DESC_SIZE,		/* maxsegsize */
++	    0,				/* flags */
++	    NULL, NULL,			/* lockfunc, lockarg */
++	    &sc->txdesc_tag);
++	if (error != 0) {
++		device_printf(sc->dev,
++		    "could not create TX ring DMA tag.\n");
++		goto out;
++	}
++
++	error = bus_dmamem_alloc(sc->txdesc_tag, (void**)&sc->txdesc_ring,
++	    BUS_DMA_COHERENT | BUS_DMA_WAITOK | BUS_DMA_ZERO,
++	    &sc->txdesc_map);
++	if (error != 0) {
++		device_printf(sc->dev,
++		    "could not allocate TX descriptor ring.\n");
++		goto out;
++	}
++
++#ifndef __rtems__
++	error = bus_dmamap_load(sc->txdesc_tag, sc->txdesc_map,
++	    sc->txdesc_ring, TX_DESC_SIZE, dwc_get1paddr,
++	    &sc->txdesc_ring_paddr, 0);
++	if (error != 0) {
++		device_printf(sc->dev,
++		    "could not load TX descriptor ring map.\n");
++		goto out;
++	}
++#endif /* __rtems__ */
++
++	for (idx = 0; idx < TX_DESC_COUNT; idx++) {
++		nidx = next_txidx(sc, idx);
++#ifndef __rtems__
++		sc->txdesc_ring[idx].addr_next = sc->txdesc_ring_paddr +
++		    (nidx * sizeof(struct dwc_hwdesc));
++#else /* __rtems__ */
++		sc->txdesc_ring[idx].addr_next =
++		    (uint32_t)(uintptr_t)&sc->txdesc_ring[nidx];
++#endif /* __rtems__ */
++	}
++
++#ifndef __rtems__
++	error = bus_dma_tag_create(
++	    bus_get_dma_tag(sc->dev),	/* Parent tag. */
++	    1, 0,			/* alignment, boundary */
++	    BUS_SPACE_MAXADDR_32BIT,	/* lowaddr */
++	    BUS_SPACE_MAXADDR,		/* highaddr */
++	    NULL, NULL,			/* filter, filterarg */
++	    MCLBYTES, 1, 		/* maxsize, nsegments */
++	    MCLBYTES,			/* maxsegsize */
++	    0,				/* flags */
++	    NULL, NULL,			/* lockfunc, lockarg */
++	    &sc->txbuf_tag);
++	if (error != 0) {
++		device_printf(sc->dev,
++		    "could not create TX ring DMA tag.\n");
++		goto out;
++	}
++#endif /* __rtems__ */
++
++	for (idx = 0; idx < TX_DESC_COUNT; idx++) {
++#ifndef __rtems__
++		error = bus_dmamap_create(sc->txbuf_tag, BUS_DMA_COHERENT,
++		    &sc->txbuf_map[idx].map);
++		if (error != 0) {
++			device_printf(sc->dev,
++			    "could not create TX buffer DMA map.\n");
++			goto out;
++		}
++#endif /* __rtems__ */
++		dwc_setup_txdesc(sc, idx, 0, 0);
++	}
++
++	/*
++	 * Set up RX descriptor ring, descriptors, dma maps, and mbufs.
++	 */
++	error = bus_dma_tag_create(
++	    bus_get_dma_tag(sc->dev),	/* Parent tag. */
++	    DWC_DESC_RING_ALIGN, 0,	/* alignment, boundary */
++	    BUS_SPACE_MAXADDR_32BIT,	/* lowaddr */
++	    BUS_SPACE_MAXADDR,		/* highaddr */
++	    NULL, NULL,			/* filter, filterarg */
++	    RX_DESC_SIZE, 1, 		/* maxsize, nsegments */
++	    RX_DESC_SIZE,		/* maxsegsize */
++	    0,				/* flags */
++	    NULL, NULL,			/* lockfunc, lockarg */
++	    &sc->rxdesc_tag);
++	if (error != 0) {
++		device_printf(sc->dev,
++		    "could not create RX ring DMA tag.\n");
++		goto out;
++	}
++
++	error = bus_dmamem_alloc(sc->rxdesc_tag, (void **)&sc->rxdesc_ring,
++	    BUS_DMA_COHERENT | BUS_DMA_WAITOK | BUS_DMA_ZERO,
++	    &sc->rxdesc_map);
++	if (error != 0) {
++		device_printf(sc->dev,
++		    "could not allocate RX descriptor ring.\n");
++		goto out;
++	}
++
++#ifndef __rtems__
++	error = bus_dmamap_load(sc->rxdesc_tag, sc->rxdesc_map,
++	    sc->rxdesc_ring, RX_DESC_SIZE, dwc_get1paddr,
++	    &sc->rxdesc_ring_paddr, 0);
++	if (error != 0) {
++		device_printf(sc->dev,
++		    "could not load RX descriptor ring map.\n");
++		goto out;
++	}
++
++	error = bus_dma_tag_create(
++	    bus_get_dma_tag(sc->dev),	/* Parent tag. */
++	    1, 0,			/* alignment, boundary */
++	    BUS_SPACE_MAXADDR_32BIT,	/* lowaddr */
++	    BUS_SPACE_MAXADDR,		/* highaddr */
++	    NULL, NULL,			/* filter, filterarg */
++	    MCLBYTES, 1, 		/* maxsize, nsegments */
++	    MCLBYTES,			/* maxsegsize */
++	    0,				/* flags */
++	    NULL, NULL,			/* lockfunc, lockarg */
++	    &sc->rxbuf_tag);
++	if (error != 0) {
++		device_printf(sc->dev,
++		    "could not create RX buf DMA tag.\n");
++		goto out;
++	}
++#endif /* __rtems__ */
++
++	for (idx = 0; idx < RX_DESC_COUNT; idx++) {
++#ifndef __rtems__
++		error = bus_dmamap_create(sc->rxbuf_tag, BUS_DMA_COHERENT,
++		    &sc->rxbuf_map[idx].map);
++		if (error != 0) {
++			device_printf(sc->dev,
++			    "could not create RX buffer DMA map.\n");
++			goto out;
++		}
++#endif /* __rtems__ */
++		if ((m = dwc_alloc_mbufcl(sc)) == NULL) {
++			device_printf(sc->dev, "Could not alloc mbuf\n");
++			error = ENOMEM;
++			goto out;
++		}
++		if ((error = dwc_setup_rxbuf(sc, idx, m)) != 0) {
++			device_printf(sc->dev,
++			    "could not create new RX buffer.\n");
++			goto out;
++		}
++	}
++
++out:
++	if (error != 0)
++		return (ENXIO);
++
++	return (0);
++}
++
++static int
++dwc_get_hwaddr(struct dwc_softc *sc, uint8_t *hwaddr)
++{
++	uint32_t hi, lo, rnd;
++
++	/*
++	 * Try to recover a MAC address from the running hardware. If there's
++	 * something non-zero there, assume the bootloader did the right thing
++	 * and just use it.
++	 *
++	 * Otherwise, set the address to a convenient locally assigned address,
++	 * 'bsd' + random 24 low-order bits.  'b' is 0x62, which has the locally
++	 * assigned bit set, and the broadcast/multicast bit clear.
++	 */
++	lo = READ4(sc, MAC_ADDRESS_LOW(0));
++	hi = READ4(sc, MAC_ADDRESS_HIGH(0)) & 0xffff;
++	if ((lo != 0xffffffff) || (hi != 0xffff)) {
++		hwaddr[0] = (lo >>  0) & 0xff;
++		hwaddr[1] = (lo >>  8) & 0xff;
++		hwaddr[2] = (lo >> 16) & 0xff;
++		hwaddr[3] = (lo >> 24) & 0xff;
++		hwaddr[4] = (hi >>  0) & 0xff;
++		hwaddr[5] = (hi >>  8) & 0xff;
++	} else {
++		rnd = arc4random() & 0x00ffffff;
++		hwaddr[0] = 'b';
++		hwaddr[1] = 's';
++		hwaddr[2] = 'd';
++		hwaddr[3] = rnd >> 16;
++		hwaddr[4] = rnd >>  8;
++		hwaddr[5] = rnd >>  0;
++	}
++
++	return (0);
++}
++
++#define	GPIO_ACTIVE_LOW 1
++
++static int
++dwc_reset(device_t dev)
++{
++	pcell_t gpio_prop[4];
++	pcell_t delay_prop[3];
++	phandle_t node, gpio_node;
++	device_t gpio;
++	uint32_t pin, flags;
++	uint32_t pin_value;
++
++	node = ofw_bus_get_node(dev);
++	if (OF_getencprop(node, "snps,reset-gpio",
++	    gpio_prop, sizeof(gpio_prop)) <= 0)
++		return (0);
++
++	if (OF_getencprop(node, "snps,reset-delays-us",
++	    delay_prop, sizeof(delay_prop)) <= 0) {
++		device_printf(dev,
++		    "Wrong property for snps,reset-delays-us");
++		return (ENXIO);
++	}
++
++	gpio_node = OF_node_from_xref(gpio_prop[0]);
++	if ((gpio = OF_device_from_xref(gpio_prop[0])) == NULL) {
++		device_printf(dev,
++		    "Can't find gpio controller for phy reset\n");
++		return (ENXIO);
++	}
++
++	if (GPIO_MAP_GPIOS(gpio, node, gpio_node,
++	    nitems(gpio_prop) - 1,
++	    gpio_prop + 1, &pin, &flags) != 0) {
++		device_printf(dev, "Can't map gpio for phy reset\n");
++		return (ENXIO);
++	}
++
++	pin_value = GPIO_PIN_LOW;
++	if (OF_hasprop(node, "snps,reset-active-low"))
++		pin_value = GPIO_PIN_HIGH;
++
++	if (flags & GPIO_ACTIVE_LOW)
++		pin_value = !pin_value;
++
++	GPIO_PIN_SETFLAGS(gpio, pin, GPIO_PIN_OUTPUT);
++	GPIO_PIN_SET(gpio, pin, pin_value);
++	DELAY(delay_prop[0]);
++	GPIO_PIN_SET(gpio, pin, !pin_value);
++	DELAY(delay_prop[1]);
++	GPIO_PIN_SET(gpio, pin, pin_value);
++	DELAY(delay_prop[2]);
++
++	return (0);
++}
++
++#ifdef EXT_RESOURCES
++static int
++dwc_clock_init(device_t dev)
++{
++	hwreset_t rst;
++	clk_t clk;
++	int error;
++
++	/* Enable clock */
++	if (clk_get_by_ofw_name(dev, 0, "stmmaceth", &clk) == 0) {
++		error = clk_enable(clk);
++		if (error != 0) {
++			device_printf(dev, "could not enable main clock\n");
++			return (error);
++		}
++	}
++
++	/* De-assert reset */
++	if (hwreset_get_by_ofw_name(dev, 0, "stmmaceth", &rst) == 0) {
++		error = hwreset_deassert(rst);
++		if (error != 0) {
++			device_printf(dev, "could not de-assert reset\n");
++			return (error);
++		}
++	}
++
++	return (0);
++}
++#endif
++
++static int
++dwc_probe(device_t dev)
++{
++
++	if (!ofw_bus_status_okay(dev))
++		return (ENXIO);
++
++	if (!ofw_bus_is_compatible(dev, "firefly,gmac"))
++		return (ENXIO);
++
++	device_set_desc(dev, "Gigabit Ethernet Controller");
++	return (BUS_PROBE_DEFAULT);
++}
++
++static int
++dwc_attach(device_t dev)
++{
++	uint8_t macaddr[ETHER_ADDR_LEN];
++	struct dwc_softc *sc;
++	struct ifnet *ifp;
++	int error, i;
++	uint32_t reg;
++
++	sc = device_get_softc(dev);
++	sc->dev = dev;
++	sc->rx_idx = 0;
++	sc->txcount = TX_DESC_COUNT;
++
++    sc->mii_clk = 0b0101; /* CR_250_300MHZ */
++    sc->mactype = DWC_GMAC_ALT_DESC;
++
++#ifdef EXT_RESOURCES
++	if (dwc_clock_init(dev) != 0)
++		return (ENXIO);
++#endif
++
++	if (bus_alloc_resources(dev, dwc_spec, sc->res)) {
++		device_printf(dev, "could not allocate resources\n");
++		return (ENXIO);
++	}
++
++	/* Memory interface */
++	sc->bst = rman_get_bustag(sc->res[0]);
++	sc->bsh = rman_get_bushandle(sc->res[0]);
++
++	/* Read MAC before reset */
++	if (dwc_get_hwaddr(sc, macaddr)) {
++		device_printf(sc->dev, "can't get mac\n");
++		return (ENXIO);
++	}
++
++	/* Reset the PHY if needed */
++	if (dwc_reset(dev) != 0) {
++		device_printf(dev, "Can't reset the PHY\n");
++		return (ENXIO);
++	}
++
++	/* Reset */
++	reg = READ4(sc, BUS_MODE);
++	reg |= (BUS_MODE_SWR);
++	WRITE4(sc, BUS_MODE, reg);
++
++	for (i = 0; i < MAC_RESET_TIMEOUT; i++) {
++		if ((READ4(sc, BUS_MODE) & BUS_MODE_SWR) == 0)
++			break;
++		DELAY(10);
++	}
++	if (i >= MAC_RESET_TIMEOUT) {
++		device_printf(sc->dev, "Can't reset DWC.\n");
++		return (ENXIO);
++	}
++
++	if (sc->mactype == DWC_GMAC_ALT_DESC) {
++		reg = BUS_MODE_FIXEDBURST;
++		reg |= (BUS_MODE_PRIORXTX_41 << BUS_MODE_PRIORXTX_SHIFT);
++	} else
++		reg = (BUS_MODE_EIGHTXPBL);
++	reg |= (BUS_MODE_PBL_BEATS_8 << BUS_MODE_PBL_SHIFT);
++	WRITE4(sc, BUS_MODE, reg);
++
++	/*
++	 * DMA must be stop while changing descriptor list addresses.
++	 */
++	reg = READ4(sc, OPERATION_MODE);
++	reg &= ~(MODE_ST | MODE_SR);
++	WRITE4(sc, OPERATION_MODE, reg);
++
++	if (setup_dma(sc))
++	        return (ENXIO);
++
++	/* Setup addresses */
++#ifndef __rtems__
++	WRITE4(sc, RX_DESCR_LIST_ADDR, sc->rxdesc_ring_paddr);
++	WRITE4(sc, TX_DESCR_LIST_ADDR, sc->txdesc_ring_paddr);
++#else /* __rtems__ */
++	WRITE4(sc, RX_DESCR_LIST_ADDR, (uint32_t)(uintptr_t)&sc->rxdesc_ring[0]);
++	WRITE4(sc, TX_DESCR_LIST_ADDR, (uint32_t)(uintptr_t)&sc->txdesc_ring[0]);
++#endif /* __rtems__ */
++
++	mtx_init(&sc->mtx, device_get_nameunit(sc->dev),
++	    MTX_NETWORK_LOCK, MTX_DEF);
++
++	callout_init_mtx(&sc->dwc_callout, &sc->mtx, 0);
++
++	/* Setup interrupt handler. */
++	error = bus_setup_intr(dev, sc->res[1], INTR_TYPE_NET | INTR_MPSAFE,
++	    NULL, dwc_intr, sc, &sc->intr_cookie);
++	if (error != 0) {
++		device_printf(dev, "could not setup interrupt handler.\n");
++		return (ENXIO);
++	}
++
++	/* Set up the ethernet interface. */
++	sc->ifp = ifp = if_alloc(IFT_ETHER);
++
++	ifp->if_softc = sc;
++	if_initname(ifp, device_get_name(dev), device_get_unit(dev));
++	ifp->if_flags = IFF_BROADCAST | IFF_SIMPLEX | IFF_MULTICAST;
++	ifp->if_capabilities = IFCAP_VLAN_MTU;
++	ifp->if_capenable = ifp->if_capabilities;
++	ifp->if_start = dwc_txstart;
++	ifp->if_ioctl = dwc_ioctl;
++	ifp->if_init = dwc_init;
++	IFQ_SET_MAXLEN(&ifp->if_snd, TX_DESC_COUNT - 1);
++	ifp->if_snd.ifq_drv_maxlen = TX_DESC_COUNT - 1;
++	IFQ_SET_READY(&ifp->if_snd);
++
++	/* Attach the mii driver. */
++	error = mii_attach(dev, &sc->miibus, ifp, dwc_media_change,
++	    dwc_media_status, BMSR_DEFCAPMASK, MII_PHY_ANY,
++	    MII_OFFSET_ANY, 0);
++
++	if (error != 0) {
++		device_printf(dev, "PHY attach failed\n");
++		return (ENXIO);
++	}
++	sc->mii_softc = device_get_softc(sc->miibus);
++
++	/* All ready to run, attach the ethernet interface. */
++	ether_ifattach(ifp, macaddr);
++	sc->is_attached = true;
++
++	return (0);
++}
++
++static int
++dwc_miibus_read_reg(device_t dev, int phy, int reg)
++{
++	struct dwc_softc *sc;
++	uint16_t mii;
++	size_t cnt;
++	int rv = 0;
++
++	sc = device_get_softc(dev);
++
++	mii = ((phy & GMII_ADDRESS_PA_MASK) << GMII_ADDRESS_PA_SHIFT)
++	    | ((reg & GMII_ADDRESS_GR_MASK) << GMII_ADDRESS_GR_SHIFT)
++	    | (sc->mii_clk << GMII_ADDRESS_CR_SHIFT)
++	    | GMII_ADDRESS_GB; /* Busy flag */
++
++	WRITE4(sc, GMII_ADDRESS, mii);
++
++	for (cnt = 0; cnt < 1000; cnt++) {
++		if (!(READ4(sc, GMII_ADDRESS) & GMII_ADDRESS_GB)) {
++			rv = READ4(sc, GMII_DATA);
++			break;
++		}
++		DELAY(10);
++	}
++
++	return rv;
++}
++
++static int
++dwc_miibus_write_reg(device_t dev, int phy, int reg, int val)
++{
++	struct dwc_softc *sc;
++	uint16_t mii;
++	size_t cnt;
++
++	sc = device_get_softc(dev);
++
++	mii = ((phy & GMII_ADDRESS_PA_MASK) << GMII_ADDRESS_PA_SHIFT)
++	    | ((reg & GMII_ADDRESS_GR_MASK) << GMII_ADDRESS_GR_SHIFT)
++	    | (sc->mii_clk << GMII_ADDRESS_CR_SHIFT)
++	    | GMII_ADDRESS_GB | GMII_ADDRESS_GW;
++
++	WRITE4(sc, GMII_DATA, val);
++	WRITE4(sc, GMII_ADDRESS, mii);
++
++	for (cnt = 0; cnt < 1000; cnt++) {
++		if (!(READ4(sc, GMII_ADDRESS) & GMII_ADDRESS_GB)) {
++			break;
++                }
++		DELAY(10);
++	}
++
++	return (0);
++}
++
++static void
++dwc_miibus_statchg(device_t dev)
++{
++	struct dwc_softc *sc;
++	struct mii_data *mii;
++	uint32_t reg;
++
++	/*
++	 * Called by the MII bus driver when the PHY establishes
++	 * link to set the MAC interface registers.
++	 */
++
++	sc = device_get_softc(dev);
++
++	DWC_ASSERT_LOCKED(sc);
++
++	mii = sc->mii_softc;
++
++	if (mii->mii_media_status & IFM_ACTIVE)
++		sc->link_is_up = true;
++	else
++		sc->link_is_up = false;
++
++	reg = READ4(sc, MAC_CONFIGURATION);
++	switch (IFM_SUBTYPE(mii->mii_media_active)) {
++	case IFM_1000_T:
++	case IFM_1000_SX:
++		reg &= ~(CONF_FES | CONF_PS);
++		break;
++	case IFM_100_TX:
++		reg |= (CONF_FES | CONF_PS);
++		break;
++	case IFM_10_T:
++		reg &= ~(CONF_FES);
++		reg |= (CONF_PS);
++		break;
++	case IFM_NONE:
++		sc->link_is_up = false;
++		return;
++	default:
++		sc->link_is_up = false;
++		device_printf(dev, "Unsupported media %u\n",
++		    IFM_SUBTYPE(mii->mii_media_active));
++		return;
++	}
++	if ((IFM_OPTIONS(mii->mii_media_active) & IFM_FDX) != 0)
++		reg |= (CONF_DM);
++	else
++		reg &= ~(CONF_DM);
++	WRITE4(sc, MAC_CONFIGURATION, reg);
++}
++
++
++static device_method_t gmac_methods[] = {
++	DEVMETHOD(device_probe,		dwc_probe),
++	DEVMETHOD(device_attach,	dwc_attach),
++
++	/* MII Interface */
++	DEVMETHOD(miibus_readreg,	dwc_miibus_read_reg),
++	DEVMETHOD(miibus_writereg,	dwc_miibus_write_reg),
++	DEVMETHOD(miibus_statchg,	dwc_miibus_statchg),
++
++	{ 0, 0 }
++};
++
++driver_t gmac_driver = {
++	"gmac",
++	gmac_methods,
++	sizeof(struct dwc_softc),
++};
++
++DRIVER_MODULE(gmac, simplebus, gmac_driver, 0, 0);
++DRIVER_MODULE(miibus, gmac, miibus_driver, 0, 0);
++
++MODULE_DEPEND(gmac, ether, 1, 1, 1);
++MODULE_DEPEND(gmac, miibus, 1, 1, 1);
+\ No newline at end of file
+diff --git a/sys/arm64/firefly/if_gmac.h b/sys/arm64/firefly/if_gmac.h
+new file mode 100644
+index 000000000..bbd7dfcd5
+--- /dev/null
++++ b/sys/arm64/firefly/if_gmac.h
+@@ -0,0 +1,292 @@
++/*-
++ * Copyright (c) 2014 Ruslan Bukin <br@bsdpad.com>
++ * All rights reserved.
++ *
++ * This software was developed by SRI International and the University of
++ * Cambridge Computer Laboratory under DARPA/AFRL contract (FA8750-10-C-0237)
++ * ("CTSRD"), as part of the DARPA CRASH research programme.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
++ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
++ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
++ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
++ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ *
++ * $FreeBSD$
++ */
++
++/*
++ * Register names were taken almost as is from the documentation.
++ */
++
++#ifndef __IF_GMAC_H__
++#define __IF_GMAC_H__
++
++#define	MAC_CONFIGURATION	0x0
++#define	 CONF_JD		(1 << 22)	/* jabber timer disable */
++#define	 CONF_BE		(1 << 21)	/* Frame Burst Enable */
++#define	 CONF_PS		(1 << 15)	/* GMII/MII */
++#define	 CONF_FES		(1 << 14)	/* MII speed select */
++#define	 CONF_DM		(1 << 11)	/* Full Duplex Enable */
++#define	 CONF_ACS		(1 << 7)
++#define	 CONF_TE		(1 << 3)
++#define	 CONF_RE		(1 << 2)
++#define	MAC_FRAME_FILTER	0x4
++#define	 FRAME_FILTER_RA	(1U << 31)	/* Receive All */
++#define	 FRAME_FILTER_HPF	(1 << 10)	/* Hash or Perfect Filter */
++#define	 FRAME_FILTER_PM	(1 << 4)	/* Pass multicast */
++#define	 FRAME_FILTER_HMC	(1 << 2)
++#define	 FRAME_FILTER_HUC	(1 << 1)
++#define	 FRAME_FILTER_PR	(1 << 0)	/* All Incoming Frames */
++#define	GMAC_MAC_HTHIGH		0x08
++#define	GMAC_MAC_HTLOW		0x0c
++#define	GMII_ADDRESS		0x10
++#define	 GMII_ADDRESS_PA_MASK	0x1f		/* Phy device */
++#define	 GMII_ADDRESS_PA_SHIFT	11
++#define	 GMII_ADDRESS_GR_MASK	0x1f		/* Phy register */
++#define	 GMII_ADDRESS_GR_SHIFT	6
++#define	 GMII_ADDRESS_CR_MASK	0xf
++#define	 GMII_ADDRESS_CR_SHIFT	2		/* Clock */
++#define	 GMII_ADDRESS_GW	(1 << 1)	/* Write operation */
++#define	 GMII_ADDRESS_GB	(1 << 0)	/* Busy */
++#define	GMII_DATA		0x14
++#define	FLOW_CONTROL		0x18
++#define	GMAC_VLAN_TAG		0x1C
++#define	VERSION			0x20
++#define	DEBUG			0x24
++#define	LPI_CONTROL_STATUS	0x30
++#define	LPI_TIMERS_CONTROL	0x34
++#define	INTERRUPT_STATUS	0x38
++#define	INTERRUPT_MASK		0x3C
++#define	MAC_ADDRESS_HIGH(n)	((n > 15 ? 0x800 : 0x40) + 0x8 * n)
++#define	MAC_ADDRESS_LOW(n)	((n > 15 ? 0x804 : 0x44) + 0x8 * n)
++
++#define	SGMII_RGMII_SMII_CTRL_STATUS	0xD8
++#define	MMC_CONTROL			0x100
++#define	 MMC_CONTROL_CNTRST		(1 << 0)
++#define	MMC_RECEIVE_INTERRUPT		0x104
++#define	MMC_TRANSMIT_INTERRUPT		0x108
++#define	MMC_RECEIVE_INTERRUPT_MASK	0x10C
++#define	MMC_TRANSMIT_INTERRUPT_MASK	0x110
++#define	TXOCTETCOUNT_GB			0x114
++#define	TXFRAMECOUNT_GB			0x118
++#define	TXBROADCASTFRAMES_G		0x11C
++#define	TXMULTICASTFRAMES_G		0x120
++#define	TX64OCTETS_GB			0x124
++#define	TX65TO127OCTETS_GB		0x128
++#define	TX128TO255OCTETS_GB		0x12C
++#define	TX256TO511OCTETS_GB		0x130
++#define	TX512TO1023OCTETS_GB		0x134
++#define	TX1024TOMAXOCTETS_GB		0x138
++#define	TXUNICASTFRAMES_GB		0x13C
++#define	TXMULTICASTFRAMES_GB		0x140
++#define	TXBROADCASTFRAMES_GB		0x144
++#define	TXUNDERFLOWERROR		0x148
++#define	TXSINGLECOL_G			0x14C
++#define	TXMULTICOL_G			0x150
++#define	TXDEFERRED			0x154
++#define	TXLATECOL			0x158
++#define	TXEXESSCOL			0x15C
++#define	TXCARRIERERR			0x160
++#define	TXOCTETCNT			0x164
++#define	TXFRAMECOUNT_G			0x168
++#define	TXEXCESSDEF			0x16C
++#define	TXPAUSEFRAMES			0x170
++#define	TXVLANFRAMES_G			0x174
++#define	TXOVERSIZE_G			0x178
++#define	RXFRAMECOUNT_GB			0x180
++#define	RXOCTETCOUNT_GB			0x184
++#define	RXOCTETCOUNT_G			0x188
++#define	RXBROADCASTFRAMES_G		0x18C
++#define	RXMULTICASTFRAMES_G		0x190
++#define	RXCRCERROR			0x194
++#define	RXALIGNMENTERROR		0x198
++#define	RXRUNTERROR			0x19C
++#define	RXJABBERERROR			0x1A0
++#define	RXUNDERSIZE_G			0x1A4
++#define	RXOVERSIZE_G			0x1A8
++#define	RX64OCTETS_GB			0x1AC
++#define	RX65TO127OCTETS_GB		0x1B0
++#define	RX128TO255OCTETS_GB		0x1B4
++#define	RX256TO511OCTETS_GB		0x1B8
++#define	RX512TO1023OCTETS_GB		0x1BC
++#define	RX1024TOMAXOCTETS_GB		0x1C0
++#define	RXUNICASTFRAMES_G		0x1C4
++#define	RXLENGTHERROR			0x1C8
++#define	RXOUTOFRANGETYPE		0x1CC
++#define	RXPAUSEFRAMES			0x1D0
++#define	RXFIFOOVERFLOW			0x1D4
++#define	RXVLANFRAMES_GB			0x1D8
++#define	RXWATCHDOGERROR			0x1DC
++#define	RXRCVERROR			0x1E0
++#define	RXCTRLFRAMES_G			0x1E4
++#define	MMC_IPC_RECEIVE_INT_MASK	0x200
++#define	MMC_IPC_RECEIVE_INT		0x208
++#define	RXIPV4_GD_FRMS			0x210
++#define	RXIPV4_HDRERR_FRMS		0x214
++#define	RXIPV4_NOPAY_FRMS		0x218
++#define	RXIPV4_FRAG_FRMS		0x21C
++#define	RXIPV4_UDSBL_FRMS		0x220
++#define	RXIPV6_GD_FRMS			0x224
++#define	RXIPV6_HDRERR_FRMS		0x228
++#define	RXIPV6_NOPAY_FRMS		0x22C
++#define	RXUDP_GD_FRMS			0x230
++#define	RXUDP_ERR_FRMS			0x234
++#define	RXTCP_GD_FRMS			0x238
++#define	RXTCP_ERR_FRMS			0x23C
++#define	RXICMP_GD_FRMS			0x240
++#define	RXICMP_ERR_FRMS			0x244
++#define	RXIPV4_GD_OCTETS		0x250
++#define	RXIPV4_HDRERR_OCTETS		0x254
++#define	RXIPV4_NOPAY_OCTETS		0x258
++#define	RXIPV4_FRAG_OCTETS		0x25C
++#define	RXIPV4_UDSBL_OCTETS		0x260
++#define	RXIPV6_GD_OCTETS		0x264
++#define	RXIPV6_HDRERR_OCTETS		0x268
++#define	RXIPV6_NOPAY_OCTETS		0x26C
++#define	RXUDP_GD_OCTETS			0x270
++#define	RXUDP_ERR_OCTETS		0x274
++#define	RXTCP_GD_OCTETS			0x278
++#define	RXTCPERROCTETS			0x27C
++#define	RXICMP_GD_OCTETS		0x280
++#define	RXICMP_ERR_OCTETS		0x284
++#define	L3_L4_CONTROL0			0x400
++#define	LAYER4_ADDRESS0			0x404
++#define	LAYER3_ADDR0_REG0		0x410
++#define	LAYER3_ADDR1_REG0		0x414
++#define	LAYER3_ADDR2_REG0		0x418
++#define	LAYER3_ADDR3_REG0		0x41C
++#define	L3_L4_CONTROL1			0x430
++#define	LAYER4_ADDRESS1			0x434
++#define	LAYER3_ADDR0_REG1		0x440
++#define	LAYER3_ADDR1_REG1		0x444
++#define	LAYER3_ADDR2_REG1		0x448
++#define	LAYER3_ADDR3_REG1		0x44C
++#define	L3_L4_CONTROL2			0x460
++#define	LAYER4_ADDRESS2			0x464
++#define	LAYER3_ADDR0_REG2		0x470
++#define	LAYER3_ADDR1_REG2		0x474
++#define	LAYER3_ADDR2_REG2		0x478
++#define	LAYER3_ADDR3_REG2		0x47C
++#define	L3_L4_CONTROL3			0x490
++#define	LAYER4_ADDRESS3			0x494
++#define	LAYER3_ADDR0_REG3		0x4A0
++#define	LAYER3_ADDR1_REG3		0x4A4
++#define	LAYER3_ADDR2_REG3		0x4A8
++#define	LAYER3_ADDR3_REG3		0x4AC
++#define	HASH_TABLE_REG(n)		0x500 + (0x4 * n)
++#define	VLAN_INCL_REG			0x584
++#define	VLAN_HASH_TABLE_REG		0x588
++#define	TIMESTAMP_CONTROL		0x700
++#define	SUB_SECOND_INCREMENT		0x704
++#define	SYSTEM_TIME_SECONDS		0x708
++#define	SYSTEM_TIME_NANOSECONDS		0x70C
++#define	SYSTEM_TIME_SECONDS_UPDATE	0x710
++#define	SYSTEM_TIME_NANOSECONDS_UPDATE	0x714
++#define	TIMESTAMP_ADDEND		0x718
++#define	TARGET_TIME_SECONDS		0x71C
++#define	TARGET_TIME_NANOSECONDS		0x720
++#define	SYSTEM_TIME_HIGHER_WORD_SECONDS	0x724
++#define	TIMESTAMP_STATUS		0x728
++#define	PPS_CONTROL			0x72C
++#define	AUXILIARY_TIMESTAMP_NANOSECONDS	0x730
++#define	AUXILIARY_TIMESTAMP_SECONDS	0x734
++#define	PPS0_INTERVAL			0x760
++#define	PPS0_WIDTH			0x764
++
++/* DMA */
++#define	BUS_MODE		0x1000
++#define	 BUS_MODE_EIGHTXPBL	(1 << 24) /* Multiplies PBL by 8 */
++#define	 BUS_MODE_FIXEDBURST	(1 << 16)
++#define	 BUS_MODE_PRIORXTX_SHIFT	14
++#define	 BUS_MODE_PRIORXTX_41	3
++#define	 BUS_MODE_PRIORXTX_31	2
++#define	 BUS_MODE_PRIORXTX_21	1
++#define	 BUS_MODE_PRIORXTX_11	0
++#define	 BUS_MODE_PBL_SHIFT	8 /* Single block transfer size */
++#define	 BUS_MODE_PBL_BEATS_8	8
++#define	 BUS_MODE_SWR		(1 << 0) /* Reset */
++#define	TRANSMIT_POLL_DEMAND	0x1004
++#define	RECEIVE_POLL_DEMAND	0x1008
++#define	RX_DESCR_LIST_ADDR	0x100C
++#define	TX_DESCR_LIST_ADDR	0x1010
++#define	DMA_STATUS		0x1014
++#define	 DMA_STATUS_NIS		(1 << 16)
++#define	 DMA_STATUS_AIS		(1 << 15)
++#define	 DMA_STATUS_FBI		(1 << 13)
++#define	 DMA_STATUS_RI		(1 << 6)
++#define	 DMA_STATUS_TI		(1 << 0)
++#define	 DMA_STATUS_INTR_MASK	0x1ffff
++#define	OPERATION_MODE		0x1018
++#define	 MODE_RSF		(1 << 25) /* RX Full Frame */
++#define	 MODE_TSF		(1 << 21) /* TX Full Frame */
++#define	 MODE_FTF		(1 << 20) /* Flush TX FIFO */
++#define	 MODE_ST		(1 << 13) /* Start DMA TX */
++#define	 MODE_FUF		(1 << 6)  /* TX frames < 64bytes */
++#define	 MODE_RTC_LEV32		0x1
++#define	 MODE_RTC_SHIFT		3
++#define	 MODE_OSF		(1 << 2) /* Process Second frame */
++#define	 MODE_SR		(1 << 1) /* Start DMA RX */
++#define	INTERRUPT_ENABLE	0x101C
++#define	 INT_EN_NIE		(1 << 16) /* Normal/Summary */
++#define	 INT_EN_AIE		(1 << 15) /* Abnormal/Summary */
++#define	 INT_EN_ERE		(1 << 14) /* Early receive */
++#define	 INT_EN_FBE		(1 << 13) /* Fatal bus error */
++#define	 INT_EN_ETE		(1 << 10) /* Early transmit */
++#define	 INT_EN_RWE		(1 << 9)  /* Receive watchdog */
++#define	 INT_EN_RSE		(1 << 8)  /* Receive stopped */
++#define	 INT_EN_RUE		(1 << 7)  /* Recv buf unavailable */
++#define	 INT_EN_RIE		(1 << 6)  /* Receive interrupt */
++#define	 INT_EN_UNE		(1 << 5)  /* Tx underflow */
++#define	 INT_EN_OVE		(1 << 4)  /* Receive overflow */
++#define	 INT_EN_TJE		(1 << 3)  /* Transmit jabber */
++#define	 INT_EN_TUE		(1 << 2)  /* Tx. buf unavailable */
++#define	 INT_EN_TSE		(1 << 1)  /* Transmit stopped */
++#define	 INT_EN_TIE		(1 << 0)  /* Transmit interrupt */
++#define	 INT_EN_DEFAULT		(INT_EN_TIE|INT_EN_RIE|	\
++	    INT_EN_NIE|INT_EN_AIE|			\
++	    INT_EN_FBE|INT_EN_UNE)
++
++#define	MISSED_FRAMEBUF_OVERFLOW_CNTR	0x1020
++#define	RECEIVE_INT_WATCHDOG_TMR	0x1024
++#define	AXI_BUS_MODE			0x1028
++#define	AHB_OR_AXI_STATUS		0x102C
++#define	CURRENT_HOST_TRANSMIT_DESCR	0x1048
++#define	CURRENT_HOST_RECEIVE_DESCR	0x104C
++#define	CURRENT_HOST_TRANSMIT_BUF_ADDR	0x1050
++#define	CURRENT_HOST_RECEIVE_BUF_ADDR	0x1054
++#define	HW_FEATURE			0x1058
++
++#define	DWC_GMAC			0x1
++#define	DWC_GMAC_ALT_DESC		0x2
++#define	GMAC_MII_CLK_60_100M_DIV42	0x0
++#define	GMAC_MII_CLK_100_150M_DIV62	0x1
++#define	GMAC_MII_CLK_25_35M_DIV16	0x2
++#define	GMAC_MII_CLK_35_60M_DIV26	0x3
++#define	GMAC_MII_CLK_150_250M_DIV102	0x4
++#define	GMAC_MII_CLK_250_300M_DIV124	0x5
++#define	GMAC_MII_CLK_DIV4		0x8
++#define	GMAC_MII_CLK_DIV6		0x9
++#define	GMAC_MII_CLK_DIV8		0xa
++#define	GMAC_MII_CLK_DIV10		0xb
++#define	GMAC_MII_CLK_DIV12		0xc
++#define	GMAC_MII_CLK_DIV14		0xd
++#define	GMAC_MII_CLK_DIV16		0xe
++#define	GMAC_MII_CLK_DIV18		0xf
++
++#endif	/* __IF_GMAC_H__ */
+\ No newline at end of file
+diff --git a/sys/arm64/firefly/if_gmacvar.h b/sys/arm64/firefly/if_gmacvar.h
+new file mode 100644
+index 000000000..a03ee2cdc
+--- /dev/null
++++ b/sys/arm64/firefly/if_gmacvar.h
+@@ -0,0 +1,110 @@
++/*-
++ * Copyright (c) 2014 Ruslan Bukin <br@bsdpad.com>
++ * All rights reserved.
++ *
++ * This software was developed by SRI International and the University of
++ * Cambridge Computer Laboratory under DARPA/AFRL contract (FA8750-10-C-0237)
++ * ("CTSRD"), as part of the DARPA CRASH research programme.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
++ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
++ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
++ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
++ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ *
++ * $FreeBSD$
++ */
++
++/*
++ * Ethernet media access controller (EMAC)
++ * Chapter 17, Altera Cyclone V Device Handbook (CV-5V2 2014.07.22)
++ *
++ * EMAC is an instance of the Synopsys DesignWare 3504-0
++ * Universal 10/100/1000 Ethernet MAC (DWC_gmac).
++ */
++
++#ifndef	__IF_GMACVAR_H__
++#define	__IF_GMACVAR_H__
++
++/*
++ * Driver data and defines.
++ */
++#define	RX_MAX_PACKET	0x7ff
++#ifndef __rtems__
++#define	RX_DESC_COUNT	1024
++#else /* __rtems__ */
++#define	RX_DESC_COUNT	64
++#endif /* __rtems__ */
++#define	RX_DESC_SIZE	(sizeof(struct dwc_hwdesc) * RX_DESC_COUNT)
++#ifndef __rtems__
++#define	TX_DESC_COUNT	1024
++#else /* __rtems__ */
++#define	TX_DESC_COUNT	256
++#endif /* __rtems__ */
++#define	TX_DESC_SIZE	(sizeof(struct dwc_hwdesc) * TX_DESC_COUNT)
++#ifdef __rtems__
++#define TX_MAX_DMA_SEGS 8 /* maximum segs in a tx mbuf dma */
++#endif /* __rtems__ */
++
++struct dwc_bufmap {
++	bus_dmamap_t		map;
++	struct mbuf		*mbuf;
++};
++
++struct dwc_softc {
++	struct resource		*res[2];
++	bus_space_tag_t		bst;
++	bus_space_handle_t	bsh;
++	device_t		dev;
++	int			mactype;
++	int			mii_clk;
++	device_t		miibus;
++	struct mii_data *	mii_softc;
++	struct ifnet		*ifp;
++	int			if_flags;
++	struct mtx		mtx;
++	void *			intr_cookie;
++	struct callout		dwc_callout;
++	boolean_t		link_is_up;
++	boolean_t		is_attached;
++	boolean_t		is_detaching;
++	int			tx_watchdog_count;
++	int			stats_harvest_count;
++
++	/* RX */
++	bus_dma_tag_t		rxdesc_tag;
++	bus_dmamap_t		rxdesc_map;
++	struct dwc_hwdesc	*rxdesc_ring;
++	bus_addr_t		rxdesc_ring_paddr;
++	bus_dma_tag_t		rxbuf_tag;
++	struct dwc_bufmap	rxbuf_map[RX_DESC_COUNT];
++	uint32_t		rx_idx;
++
++	/* TX */
++	bus_dma_tag_t		txdesc_tag;
++	bus_dmamap_t		txdesc_map;
++	struct dwc_hwdesc	*txdesc_ring;
++	bus_addr_t		txdesc_ring_paddr;
++	bus_dma_tag_t		txbuf_tag;
++	struct dwc_bufmap	txbuf_map[TX_DESC_COUNT];
++	uint32_t		tx_idx_head;
++	uint32_t		tx_idx_tail;
++	int			txcount;
++};
++
++#endif	/* __IF_GMACVAR_H__ */
+\ No newline at end of file
+diff --git a/sys/arm64/firefly/if_xmac.c b/sys/arm64/firefly/if_xmac.c
+new file mode 100644
+index 000000000..63fe77719
+--- /dev/null
++++ b/sys/arm64/firefly/if_xmac.c
+@@ -0,0 +1,2311 @@
++/*-
++ * SPDX-License-Identifier: BSD-2-Clause
++ *
++ * Copyright (c) 2012-2014 Thomas Skibo <thomasskibo@yahoo.com>
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY AUTHOR AND CONTRIBUTORS ``AS IS'' AND
++ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED.  IN NO EVENT SHALL AUTHOR OR CONTRIBUTORS BE LIABLE
++ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
++ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
++ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ */
++
++/*
++ * A network interface driver for Cadence GEM Gigabit Ethernet
++ * interface such as the one used in Xilinx Zynq-7000 SoC.
++ *
++ * Reference: Zynq-7000 All Programmable SoC Technical Reference Manual.
++ * (v1.4) November 16, 2012.  Xilinx doc UG585.  GEM is covered in Ch. 16
++ * and register definitions are in appendix B.18.
++ */
++#ifdef __rtems__
++#include <machine/rtems-bsd-kernel-space.h>
++#endif /* __rtems__ */
++
++#include <sys/cdefs.h>
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <sys/bus.h>
++#include <sys/kernel.h>
++#include <sys/malloc.h>
++#include <sys/mbuf.h>
++#include <sys/module.h>
++#include <sys/rman.h>
++#include <sys/socket.h>
++#include <sys/sockio.h>
++#include <sys/sysctl.h>
++
++#include <machine/bus.h>
++
++#include <net/ethernet.h>
++#include <net/if.h>
++#include <net/if_arp.h>
++#include <net/if_dl.h>
++#include <net/if_media.h>
++#include <net/if_mib.h>
++#include <net/if_types.h>
++
++#ifdef INET
++#include <netinet/in.h>
++#include <netinet/in_systm.h>
++#include <netinet/in_var.h>
++#include <netinet/ip.h>
++#endif
++
++#include <net/bpf.h>
++#include <net/bpfdesc.h>
++
++#include <dev/fdt/fdt_common.h>
++#include <dev/ofw/ofw_bus.h>
++#include <dev/ofw/ofw_bus_subr.h>
++
++#include <dev/mii/mii.h>
++#include <dev/mii/miivar.h>
++#include <dev/mii/mii_fdt.h>
++
++#include <dev/extres/clk/clk.h>
++
++#define CGEM64
++
++#ifdef __rtems__
++#include <rtems/bsd/local/miibus_if.h>
++#include "if_xmac_hw.h"
++#else
++#include "miibus_if.h"
++#include <arm64/firefly/if_xmac_hw.h>
++#endif
++
++#define IF_CGEM_NAME "xmac"
++
++#define CGEM_NUM_RX_DESCS	512	/* size of receive descriptor ring */
++#define CGEM_NUM_TX_DESCS	512	/* size of transmit descriptor ring */
++
++/* Default for sysctl rxbufs.  Must be < CGEM_NUM_RX_DESCS of course. */
++#define DEFAULT_NUM_RX_BUFS	256	/* number of receive bufs to queue. */
++
++#define TX_MAX_DMA_SEGS		8	/* maximum segs in a tx mbuf dma */
++
++#define CGEM_CKSUM_ASSIST	(CSUM_IP | CSUM_TCP | CSUM_UDP | \
++				 CSUM_TCP_IPV6 | CSUM_UDP_IPV6)
++
++#define HWQUIRK_NONE		0
++#define HWQUIRK_NEEDNULLQS	1
++#define HWQUIRK_RXHANGWAR	2
++#define HWQUIRK_VERSION2    4
++
++static struct ofw_compat_data compat_data[] = {
++	{ "firefly,xmac",			HWQUIRK_NEEDNULLQS },
++	{ "firefly,xmac_v2",		HWQUIRK_VERSION2 },
++	{ NULL,				0 }
++};
++
++struct cgem_softc {
++	if_t			ifp;
++	struct mtx		sc_mtx;
++	device_t		dev;
++	device_t		miibus;
++	u_int			version;
++	u_int			mii_media_active;	/* last active media */
++	int			if_old_flags;
++	struct resource		*mem_res;
++	struct resource		*irq_res;
++	void			*intrhand;
++	struct callout		tick_ch;
++	uint32_t		net_ctl_shadow;
++	uint32_t		net_cfg_shadow;
++	clk_t			clk_pclk;
++	clk_t			clk_hclk;
++	clk_t			clk_txclk;
++	clk_t			clk_rxclk;
++	clk_t			clk_tsuclk;
++	int			neednullqs;
++	int			phy_contype;
++
++	bus_dma_tag_t		desc_dma_tag;
++	bus_dma_tag_t		mbuf_dma_tag;
++
++	/* receive descriptor ring */
++	struct cgem_rx_desc	*rxring;
++	bus_addr_t		rxring_physaddr;
++	struct mbuf		*rxring_m[CGEM_NUM_RX_DESCS];
++	bus_dmamap_t		rxring_m_dmamap[CGEM_NUM_RX_DESCS];
++	int			rxring_hd_ptr;	/* where to put rcv bufs */
++	int			rxring_tl_ptr;	/* where to get receives */
++	int			rxring_queued;	/* how many rcv bufs queued */
++	bus_dmamap_t		rxring_dma_map;
++	int			rxbufs;		/* tunable number rcv bufs */
++	int			rxhangwar;	/* rx hang work-around */
++	u_int			rxoverruns;	/* rx overruns */
++	u_int			rxnobufs;	/* rx buf ring empty events */
++	u_int			rxdmamapfails;	/* rx dmamap failures */
++	uint32_t		rx_frames_prev;
++
++	/* transmit descriptor ring */
++	struct cgem_tx_desc	*txring;
++	bus_addr_t		txring_physaddr;
++	struct mbuf		*txring_m[CGEM_NUM_TX_DESCS];
++	bus_dmamap_t		txring_m_dmamap[CGEM_NUM_TX_DESCS];
++	int			txring_hd_ptr;	/* where to put next xmits */
++	int			txring_tl_ptr;	/* next xmit mbuf to free */
++	int			txring_queued;	/* num xmits segs queued */
++	u_int			txfull;		/* tx ring full events */
++	u_int			txdefrags;	/* tx calls to m_defrag() */
++	u_int			txdefragfails;	/* tx m_defrag() failures */
++	u_int			txdmamapfails;	/* tx dmamap failures */
++
++	/* null descriptor rings */
++	void			*null_qs;
++	bus_addr_t		null_qs_physaddr;
++
++	/* hardware provided statistics */
++	struct cgem_hw_stats {
++		uint64_t		tx_bytes;
++		uint32_t		tx_frames;
++		uint32_t		tx_frames_bcast;
++		uint32_t		tx_frames_multi;
++		uint32_t		tx_frames_pause;
++		uint32_t		tx_frames_64b;
++		uint32_t		tx_frames_65to127b;
++		uint32_t		tx_frames_128to255b;
++		uint32_t		tx_frames_256to511b;
++		uint32_t		tx_frames_512to1023b;
++		uint32_t		tx_frames_1024to1536b;
++		uint32_t		tx_under_runs;
++		uint32_t		tx_single_collisn;
++		uint32_t		tx_multi_collisn;
++		uint32_t		tx_excsv_collisn;
++		uint32_t		tx_late_collisn;
++		uint32_t		tx_deferred_frames;
++		uint32_t		tx_carrier_sense_errs;
++
++		uint64_t		rx_bytes;
++		uint32_t		rx_frames;
++		uint32_t		rx_frames_bcast;
++		uint32_t		rx_frames_multi;
++		uint32_t		rx_frames_pause;
++		uint32_t		rx_frames_64b;
++		uint32_t		rx_frames_65to127b;
++		uint32_t		rx_frames_128to255b;
++		uint32_t		rx_frames_256to511b;
++		uint32_t		rx_frames_512to1023b;
++		uint32_t		rx_frames_1024to1536b;
++		uint32_t		rx_frames_undersize;
++		uint32_t		rx_frames_oversize;
++		uint32_t		rx_frames_jabber;
++		uint32_t		rx_frames_fcs_errs;
++		uint32_t		rx_frames_length_errs;
++		uint32_t		rx_symbol_errs;
++		uint32_t		rx_align_errs;
++		uint32_t		rx_resource_errs;
++		uint32_t		rx_overrun_errs;
++		uint32_t		rx_ip_hdr_csum_errs;
++		uint32_t		rx_tcp_csum_errs;
++		uint32_t		rx_udp_csum_errs;
++	} stats;
++};
++
++#define RD4(sc, off)		(bus_read_4((sc)->mem_res, (off)))
++#define WR4(sc, off, val)	(bus_write_4((sc)->mem_res, (off), (val)))
++#define BARRIER(sc, off, len, flags) \
++	(bus_barrier((sc)->mem_res, (off), (len), (flags))
++
++#define CGEM_LOCK(sc)		mtx_lock(&(sc)->sc_mtx)
++#define CGEM_UNLOCK(sc)		mtx_unlock(&(sc)->sc_mtx)
++#define CGEM_LOCK_INIT(sc)	mtx_init(&(sc)->sc_mtx, \
++	    device_get_nameunit((sc)->dev), MTX_NETWORK_LOCK, MTX_DEF)
++#define CGEM_LOCK_DESTROY(sc)	mtx_destroy(&(sc)->sc_mtx)
++#define CGEM_ASSERT_LOCKED(sc)	mtx_assert(&(sc)->sc_mtx, MA_OWNED)
++
++/* Allow platforms to optionally provide a way to set the reference clock. */
++int cgem_set_ref_clk(int unit, int frequency);
++
++static int cgem_probe(device_t dev);
++static int cgem_attach(device_t dev);
++static int cgem_detach(device_t dev);
++static void cgem_tick(void *);
++static void cgem_intr(void *);
++
++static void cgem_mediachange(struct cgem_softc *, struct mii_data *);
++
++static void
++cgem_get_mac(struct cgem_softc *sc, u_char eaddr[])
++{
++	int i;
++	uint32_t rnd;
++
++	/* See if boot loader gave us a MAC address already. */
++	for (i = 0; i < 4; i++) {
++		uint32_t low = RD4(sc, CGEM_SPEC_ADDR_LOW(i));
++		uint32_t high = RD4(sc, CGEM_SPEC_ADDR_HI(i)) & 0xffff;
++		if (low != 0 || high != 0) {
++			eaddr[0] = low & 0xff;
++			eaddr[1] = (low >> 8) & 0xff;
++			eaddr[2] = (low >> 16) & 0xff;
++			eaddr[3] = (low >> 24) & 0xff;
++			eaddr[4] = high & 0xff;
++			eaddr[5] = (high >> 8) & 0xff;
++			break;
++		}
++	}
++
++	/* No MAC from boot loader?  Assign a random one. */
++	if (i == 4) {
++		rnd = arc4random();
++
++		eaddr[0] = 'b';
++		eaddr[1] = 's';
++		eaddr[2] = 'd';
++		eaddr[3] = (rnd >> 16) & 0xff;
++		eaddr[4] = (rnd >> 8) & 0xff;
++		eaddr[5] = rnd & 0xff;
++
++		device_printf(sc->dev, "no mac address found, assigning "
++		    "random: %02x:%02x:%02x:%02x:%02x:%02x\n", eaddr[0],
++		    eaddr[1], eaddr[2], eaddr[3], eaddr[4], eaddr[5]);
++	}
++
++	/* Move address to first slot and zero out the rest. */
++	WR4(sc, CGEM_SPEC_ADDR_LOW(0), (eaddr[3] << 24) |
++	    (eaddr[2] << 16) | (eaddr[1] << 8) | eaddr[0]);
++	WR4(sc, CGEM_SPEC_ADDR_HI(0), (eaddr[5] << 8) | eaddr[4]);
++
++	for (i = 1; i < 4; i++) {
++		WR4(sc, CGEM_SPEC_ADDR_LOW(i), 0);
++		WR4(sc, CGEM_SPEC_ADDR_HI(i), 0);
++	}
++}
++
++/*
++ * cgem_mac_hash():  map 48-bit address to a 6-bit hash. The 6-bit hash
++ * corresponds to a bit in a 64-bit hash register.  Setting that bit in the
++ * hash register enables reception of all frames with a destination address
++ * that hashes to that 6-bit value.
++ *
++ * The hash function is described in sec. 16.2.3 in the Zynq-7000 Tech
++ * Reference Manual.  Bits 0-5 in the hash are the exclusive-or of
++ * every sixth bit in the destination address.
++ */
++static int
++cgem_mac_hash(u_char eaddr[])
++{
++	int hash;
++	int i, j;
++
++	hash = 0;
++	for (i = 0; i < 6; i++)
++		for (j = i; j < 48; j += 6)
++			if ((eaddr[j >> 3] & (1 << (j & 7))) != 0)
++				hash ^= (1 << i);
++
++	return hash;
++}
++
++static u_int
++cgem_hash_maddr(void *arg, struct sockaddr_dl *sdl, u_int cnt)
++{
++	uint32_t *hashes = arg;
++	int index;
++
++	index = cgem_mac_hash(LLADDR(sdl));
++	if (index > 31)
++		hashes[0] |= (1U << (index - 32));
++	else
++		hashes[1] |= (1U << index);
++
++	return (1);
++}
++
++/*
++ * After any change in rx flags or multi-cast addresses, set up hash registers
++ * and net config register bits.
++ */
++static void
++cgem_rx_filter(struct cgem_softc *sc)
++{
++	if_t ifp = sc->ifp;
++	uint32_t hashes[2] = { 0, 0 };
++
++	sc->net_cfg_shadow &= ~(CGEM_NET_CFG_MULTI_HASH_EN |
++	    CGEM_NET_CFG_NO_BCAST | CGEM_NET_CFG_COPY_ALL);
++
++	if ((if_getflags(ifp) & IFF_PROMISC) != 0)
++		sc->net_cfg_shadow |= CGEM_NET_CFG_COPY_ALL;
++	else {
++		if ((if_getflags(ifp) & IFF_BROADCAST) == 0)
++			sc->net_cfg_shadow |= CGEM_NET_CFG_NO_BCAST;
++		if ((if_getflags(ifp) & IFF_ALLMULTI) != 0) {
++			hashes[0] = 0xffffffff;
++			hashes[1] = 0xffffffff;
++		} else
++			if_foreach_llmaddr(ifp, cgem_hash_maddr, hashes);
++
++		if (hashes[0] != 0 || hashes[1] != 0)
++			sc->net_cfg_shadow |= CGEM_NET_CFG_MULTI_HASH_EN;
++	}
++
++	WR4(sc, CGEM_HASH_TOP, hashes[0]);
++	WR4(sc, CGEM_HASH_BOT, hashes[1]);
++	WR4(sc, CGEM_NET_CFG, sc->net_cfg_shadow);
++}
++
++#ifndef __rtems__
++/* For bus_dmamap_load() callback. */
++static void
++cgem_getaddr(void *arg, bus_dma_segment_t *segs, int nsegs, int error)
++{
++
++	if (nsegs != 1 || error != 0)
++		return;
++	*(bus_addr_t *)arg = segs[0].ds_addr;
++}
++#endif
++
++/* Set up null queues for priority queues we actually can't disable. */
++static void
++cgem_null_qs(struct cgem_softc *sc)
++{
++	struct cgem_rx_desc *rx_desc;
++	struct cgem_tx_desc *tx_desc;
++	uint32_t queue_mask;
++	int n;
++
++	/* Read design config register 6 to determine number of queues. */
++	queue_mask = (RD4(sc, CGEM_DESIGN_CFG6) &
++	    CGEM_DESIGN_CFG6_DMA_PRIO_Q_MASK) >> 1;
++	if (queue_mask == 0)
++		return;
++
++	/* Create empty RX queue and empty TX buf queues. */
++	memset(sc->null_qs, 0, sizeof(struct cgem_rx_desc) +
++	    sizeof(struct cgem_tx_desc));
++	rx_desc = sc->null_qs;
++	rx_desc->addr = CGEM_RXDESC_OWN | CGEM_RXDESC_WRAP;
++	tx_desc = (struct cgem_tx_desc *)(rx_desc + 1);
++	tx_desc->ctl = CGEM_TXDESC_USED | CGEM_TXDESC_WRAP;
++
++	/* Point all valid ring base pointers to the null queues. */
++	for (n = 1; (queue_mask & 1) != 0; n++, queue_mask >>= 1) {
++		WR4(sc, CGEM_RX_QN_BAR(n), sc->null_qs_physaddr);
++		WR4(sc, CGEM_TX_QN_BAR(n), sc->null_qs_physaddr +
++		    sizeof(struct cgem_rx_desc));
++	}
++}
++
++/* Create DMA'able descriptor rings. */
++static int
++cgem_setup_descs(struct cgem_softc *sc)
++{
++	int i, err;
++	int desc_rings_size = CGEM_NUM_RX_DESCS * sizeof(struct cgem_rx_desc) +
++	    CGEM_NUM_TX_DESCS * sizeof(struct cgem_tx_desc);
++
++	if (sc->neednullqs)
++		desc_rings_size += sizeof(struct cgem_rx_desc) +
++		    sizeof(struct cgem_tx_desc);
++
++	sc->txring = NULL;
++	sc->rxring = NULL;
++
++	/* Allocate non-cached DMA space for RX and TX descriptors. */
++	err = bus_dma_tag_create(bus_get_dma_tag(sc->dev), 1,
++#ifdef CGEM64
++	    1ULL << 32,	/* Do not cross a 4G boundary. */
++#else
++	    0,
++#endif
++	    BUS_SPACE_MAXADDR, BUS_SPACE_MAXADDR, NULL, NULL,
++	    desc_rings_size, 1, desc_rings_size, 0,
++	    busdma_lock_mutex, &sc->sc_mtx, &sc->desc_dma_tag);
++	if (err)
++		return (err);
++
++	/* Set up a bus_dma_tag for mbufs. */
++	err = bus_dma_tag_create(bus_get_dma_tag(sc->dev), 1, 0,
++	    BUS_SPACE_MAXADDR, BUS_SPACE_MAXADDR, NULL, NULL, MCLBYTES,
++	    TX_MAX_DMA_SEGS, MCLBYTES, 0, busdma_lock_mutex, &sc->sc_mtx,
++	    &sc->mbuf_dma_tag);
++	if (err)
++		return (err);
++
++	/*
++	 * Allocate DMA memory. We allocate transmit, receive and null
++	 * descriptor queues all at once because the hardware only provides
++	 * one register for the upper 32 bits of rx and tx descriptor queues
++	 * hardware addresses.
++	 */
++	err = bus_dmamem_alloc(sc->desc_dma_tag, (void **)&sc->rxring,
++	    BUS_DMA_NOWAIT | BUS_DMA_COHERENT | BUS_DMA_ZERO,
++	    &sc->rxring_dma_map);
++	if (err)
++		return (err);
++
++#ifndef __rtems__
++	/* Load descriptor DMA memory. */
++	err = bus_dmamap_load(sc->desc_dma_tag, sc->rxring_dma_map,
++	    (void *)sc->rxring, desc_rings_size,
++	    cgem_getaddr, &sc->rxring_physaddr, BUS_DMA_NOWAIT);
++	if (err)
++		return (err);
++#else /* __rtems__ */
++    sc->rxring_physaddr = (bus_addr_t)(void *)sc->rxring;
++    wmb();
++#endif /* __rtems__ */
++
++	/* Initialize RX descriptors. */
++	for (i = 0; i < CGEM_NUM_RX_DESCS; i++) {
++		sc->rxring[i].addr = CGEM_RXDESC_OWN;
++		sc->rxring[i].ctl = 0;
++		sc->rxring_m[i] = NULL;
++		sc->rxring_m_dmamap[i] = NULL;
++	}
++	sc->rxring[CGEM_NUM_RX_DESCS - 1].addr |= CGEM_RXDESC_WRAP;
++
++	sc->rxring_hd_ptr = 0;
++	sc->rxring_tl_ptr = 0;
++	sc->rxring_queued = 0;
++
++	sc->txring = (struct cgem_tx_desc *)(sc->rxring + CGEM_NUM_RX_DESCS);
++	sc->txring_physaddr = sc->rxring_physaddr + CGEM_NUM_RX_DESCS *
++	    sizeof(struct cgem_rx_desc);
++
++	/* Initialize TX descriptor ring. */
++	for (i = 0; i < CGEM_NUM_TX_DESCS; i++) {
++		sc->txring[i].addr = 0;
++		sc->txring[i].ctl = CGEM_TXDESC_USED;
++		sc->txring_m[i] = NULL;
++		sc->txring_m_dmamap[i] = NULL;
++	}
++	sc->txring[CGEM_NUM_TX_DESCS - 1].ctl |= CGEM_TXDESC_WRAP;
++
++	sc->txring_hd_ptr = 0;
++	sc->txring_tl_ptr = 0;
++	sc->txring_queued = 0;
++
++	if (sc->version == 2) {
++		WR4(sc, CGEM_TAIL(0), (1U << 31) | 0U);
++	}
++
++	if (sc->neednullqs) {
++		sc->null_qs = (void *)(sc->txring + CGEM_NUM_TX_DESCS);
++		sc->null_qs_physaddr = sc->txring_physaddr +
++		    CGEM_NUM_TX_DESCS * sizeof(struct cgem_tx_desc);
++
++		cgem_null_qs(sc);
++	}
++
++	return (0);
++}
++
++#ifdef __rtems__
++static int
++cgem_get_segs_for_rx(struct mbuf *m, bus_dma_segment_t segs[TX_MAX_DMA_SEGS],
++    int *nsegs)
++{
++	int i = 0;
++
++	do {
++		if (m->m_len > 0) {
++			segs[i].ds_addr = mtod(m, bus_addr_t);
++			segs[i].ds_len = m->m_len;
++			rtems_cache_invalidate_multiple_data_lines(m->m_data, m->m_len);
++			++i;
++		}
++
++		m = m->m_next;
++
++		if (m == NULL) {
++			*nsegs = i;
++
++			return (0);
++		}
++	} while (i < TX_MAX_DMA_SEGS);
++
++	printf("%s: too many segments for rx mbuf chain\n", IF_CGEM_NAME);
++	return (EFBIG);
++}
++#endif /* __rtems__ */
++
++/* Fill receive descriptor ring with mbufs. */
++static void
++cgem_fill_rqueue(struct cgem_softc *sc)
++{
++	struct mbuf *m = NULL;
++	bus_dma_segment_t segs[TX_MAX_DMA_SEGS];
++	int nsegs;
++
++	CGEM_ASSERT_LOCKED(sc);
++
++	while (sc->rxring_queued < sc->rxbufs) {
++		/* Get a cluster mbuf. */
++		m = m_getcl(M_NOWAIT, MT_DATA, M_PKTHDR);
++		if (m == NULL)
++			break;
++
++		m->m_len = MCLBYTES;
++		m->m_pkthdr.len = MCLBYTES;
++		m->m_pkthdr.rcvif = sc->ifp;
++
++		/* Load map and plug in physical address. */
++#ifndef __rtems__
++		if (bus_dmamap_create(sc->mbuf_dma_tag, 0,
++		    &sc->rxring_m_dmamap[sc->rxring_hd_ptr])) {
++			sc->rxdmamapfails++;
++			m_free(m);
++			break;
++		}
++		if (bus_dmamap_load_mbuf_sg(sc->mbuf_dma_tag,
++		    sc->rxring_m_dmamap[sc->rxring_hd_ptr], m,
++		    segs, &nsegs, BUS_DMA_NOWAIT)) {
++			sc->rxdmamapfails++;
++			bus_dmamap_destroy(sc->mbuf_dma_tag,
++				   sc->rxring_m_dmamap[sc->rxring_hd_ptr]);
++			sc->rxring_m_dmamap[sc->rxring_hd_ptr] = NULL;
++			m_free(m);
++			break;
++		}
++#else  /* __rtems__ */
++		if (cgem_get_segs_for_rx(m, segs, &nsegs)) {
++			sc->rxdmamapfails++;
++			m_free(m);
++			break;
++		}
++#endif /* __rtems__ */
++		sc->rxring_m[sc->rxring_hd_ptr] = m;
++
++		/* Sync cache with receive buffer. */
++#ifndef __rtems__
++		bus_dmamap_sync(sc->mbuf_dma_tag,
++		    sc->rxring_m_dmamap[sc->rxring_hd_ptr],
++		    BUS_DMASYNC_PREREAD);
++#else /* __rtems__ */
++		rtems_cache_invalidate_multiple_data_lines(m->m_data, m->m_len);
++#endif /* __rtems__ */
++
++		/* Write rx descriptor and increment head pointer. */
++		sc->rxring[sc->rxring_hd_ptr].ctl = 0;
++#ifdef CGEM64
++		sc->rxring[sc->rxring_hd_ptr].addrhi = segs[0].ds_addr >> 32;
++#endif
++		if (sc->rxring_hd_ptr == CGEM_NUM_RX_DESCS - 1) {
++			sc->rxring[sc->rxring_hd_ptr].addr = segs[0].ds_addr |
++			    CGEM_RXDESC_WRAP;
++			sc->rxring_hd_ptr = 0;
++		} else
++			sc->rxring[sc->rxring_hd_ptr++].addr = segs[0].ds_addr;
++
++		sc->rxring_queued++;
++	}
++}
++
++/* Pull received packets off of receive descriptor ring. */
++static void
++cgem_recv(struct cgem_softc *sc)
++{
++	if_t ifp = sc->ifp;
++	struct mbuf *m, *m_hd, **m_tl;
++	uint32_t ctl;
++
++	CGEM_ASSERT_LOCKED(sc);
++
++	/* Pick up all packets in which the OWN bit is set. */
++	m_hd = NULL;
++	m_tl = &m_hd;
++	while (sc->rxring_queued > 0 &&
++	    (sc->rxring[sc->rxring_tl_ptr].addr & CGEM_RXDESC_OWN) != 0) {
++		ctl = sc->rxring[sc->rxring_tl_ptr].ctl;
++
++		/* Grab filled mbuf. */
++		m = sc->rxring_m[sc->rxring_tl_ptr];
++		sc->rxring_m[sc->rxring_tl_ptr] = NULL;
++
++		/* Sync cache with receive buffer. */
++#ifndef __rtems__
++		bus_dmamap_sync(sc->mbuf_dma_tag,
++		    sc->rxring_m_dmamap[sc->rxring_tl_ptr],
++		    BUS_DMASYNC_POSTREAD);
++#else /* __rtems__ */
++		rtems_cache_invalidate_multiple_data_lines(m->m_data, m->m_len);
++#endif /* __rtems__ */
++
++#ifndef __rtems__
++		/* Unload and destroy dmamap. */
++		bus_dmamap_unload(sc->mbuf_dma_tag,
++		    sc->rxring_m_dmamap[sc->rxring_tl_ptr]);
++		bus_dmamap_destroy(sc->mbuf_dma_tag,
++		    sc->rxring_m_dmamap[sc->rxring_tl_ptr]);
++		sc->rxring_m_dmamap[sc->rxring_tl_ptr] = NULL;
++#else /* __rtems__ */
++		wmb();
++#endif /* __rtems__ */
++
++		/* Increment tail pointer. */
++		if (++sc->rxring_tl_ptr == CGEM_NUM_RX_DESCS)
++			sc->rxring_tl_ptr = 0;
++		sc->rxring_queued--;
++
++		/*
++		 * Check FCS and make sure entire packet landed in one mbuf
++		 * cluster (which is much bigger than the largest ethernet
++		 * packet).
++		 */
++		if ((ctl & CGEM_RXDESC_BAD_FCS) != 0 ||
++		    (ctl & (CGEM_RXDESC_SOF | CGEM_RXDESC_EOF)) !=
++		    (CGEM_RXDESC_SOF | CGEM_RXDESC_EOF)) {
++			/* discard. */
++			m_free(m);
++			if_inc_counter(ifp, IFCOUNTER_IERRORS, 1);
++			continue;
++		}
++
++		/* Ready it to hand off to upper layers. */
++		m->m_data += ETHER_ALIGN;
++		m->m_len = (ctl & CGEM_RXDESC_LENGTH_MASK);
++		m->m_pkthdr.rcvif = ifp;
++		m->m_pkthdr.len = m->m_len;
++
++		/*
++		 * Are we using hardware checksumming?  Check the status in the
++		 * receive descriptor.
++		 */
++		if ((if_getcapenable(ifp) & IFCAP_RXCSUM) != 0) {
++			/* TCP or UDP checks out, IP checks out too. */
++			if ((ctl & CGEM_RXDESC_CKSUM_STAT_MASK) ==
++			    CGEM_RXDESC_CKSUM_STAT_TCP_GOOD ||
++			    (ctl & CGEM_RXDESC_CKSUM_STAT_MASK) ==
++			    CGEM_RXDESC_CKSUM_STAT_UDP_GOOD) {
++				m->m_pkthdr.csum_flags |=
++				    CSUM_IP_CHECKED | CSUM_IP_VALID |
++				    CSUM_DATA_VALID | CSUM_PSEUDO_HDR;
++				m->m_pkthdr.csum_data = 0xffff;
++			} else if ((ctl & CGEM_RXDESC_CKSUM_STAT_MASK) ==
++			    CGEM_RXDESC_CKSUM_STAT_IP_GOOD) {
++				/* Only IP checks out. */
++				m->m_pkthdr.csum_flags |=
++				    CSUM_IP_CHECKED | CSUM_IP_VALID;
++				m->m_pkthdr.csum_data = 0xffff;
++			}
++		}
++
++		/* Queue it up for delivery below. */
++		*m_tl = m;
++		m_tl = &m->m_next;
++	}
++
++	/* Replenish receive buffers. */
++	cgem_fill_rqueue(sc);
++
++	/* Unlock and send up packets. */
++	CGEM_UNLOCK(sc);
++	while (m_hd != NULL) {
++		m = m_hd;
++		m_hd = m_hd->m_next;
++		m->m_next = NULL;
++		if_inc_counter(ifp, IFCOUNTER_IPACKETS, 1);
++		if_input(ifp, m);
++	}
++	CGEM_LOCK(sc);
++}
++
++/* Find completed transmits and free their mbufs. */
++static void
++cgem_clean_tx(struct cgem_softc *sc)
++{
++	struct mbuf *m;
++	uint32_t ctl;
++
++	CGEM_ASSERT_LOCKED(sc);
++
++	/* free up finished transmits. */
++	while (sc->txring_queued > 0 &&
++	    ((ctl = sc->txring[sc->txring_tl_ptr].ctl) &
++	    CGEM_TXDESC_USED) != 0) {
++		/* Sync cache. */
++#ifndef __rtems__
++		bus_dmamap_sync(sc->mbuf_dma_tag,
++		    sc->txring_m_dmamap[sc->txring_tl_ptr],
++		    BUS_DMASYNC_POSTWRITE);
++
++		/* Unload and destroy DMA map. */
++		bus_dmamap_unload(sc->mbuf_dma_tag,
++		    sc->txring_m_dmamap[sc->txring_tl_ptr]);
++		bus_dmamap_destroy(sc->mbuf_dma_tag,
++		    sc->txring_m_dmamap[sc->txring_tl_ptr]);
++		sc->txring_m_dmamap[sc->txring_tl_ptr] = NULL;
++#else /* __rtems__ */
++		wmb();
++#endif /* __rtems__ */
++
++		/* Free up the mbuf. */
++		m = sc->txring_m[sc->txring_tl_ptr];
++		sc->txring_m[sc->txring_tl_ptr] = NULL;
++		m_freem(m);
++
++		/* Check the status. */
++		if ((ctl & CGEM_TXDESC_AHB_ERR) != 0) {
++			/* Serious bus error. log to console. */
++#ifdef CGEM64
++			device_printf(sc->dev,
++			    "cgem_clean_tx: AHB error, addr=0x%x%08x\n",
++			    sc->txring[sc->txring_tl_ptr].addrhi,
++			    sc->txring[sc->txring_tl_ptr].addr);
++#else
++			device_printf(sc->dev,
++			    "cgem_clean_tx: AHB error, addr=0x%x\n",
++			    sc->txring[sc->txring_tl_ptr].addr);
++#endif
++		} else if ((ctl & (CGEM_TXDESC_RETRY_ERR |
++		    CGEM_TXDESC_LATE_COLL)) != 0) {
++			if_inc_counter(sc->ifp, IFCOUNTER_OERRORS, 1);
++		} else
++			if_inc_counter(sc->ifp, IFCOUNTER_OPACKETS, 1);
++
++		/*
++		 * If the packet spanned more than one tx descriptor, skip
++		 * descriptors until we find the end so that only
++		 * start-of-frame descriptors are processed.
++		 */
++		while ((ctl & CGEM_TXDESC_LAST_BUF) == 0) {
++			if ((ctl & CGEM_TXDESC_WRAP) != 0)
++				sc->txring_tl_ptr = 0;
++			else
++				sc->txring_tl_ptr++;
++			sc->txring_queued--;
++
++			ctl = sc->txring[sc->txring_tl_ptr].ctl;
++
++			sc->txring[sc->txring_tl_ptr].ctl =
++			    ctl | CGEM_TXDESC_USED;
++		}
++
++		/* Next descriptor. */
++		if ((ctl & CGEM_TXDESC_WRAP) != 0)
++			sc->txring_tl_ptr = 0;
++		else
++			sc->txring_tl_ptr++;
++		sc->txring_queued--;
++
++		if_setdrvflagbits(sc->ifp, 0, IFF_DRV_OACTIVE);
++	}
++}
++
++#ifdef __rtems__
++static int
++cgem_get_segs_for_tx(struct mbuf *m, bus_dma_segment_t segs[TX_MAX_DMA_SEGS],
++    int *nsegs)
++{
++	int i = 0;
++
++	do {
++		if (m->m_len > 0) {
++			segs[i].ds_addr = mtod(m, bus_addr_t);
++			segs[i].ds_len = m->m_len;
++			rtems_cache_flush_multiple_data_lines(m->m_data, m->m_len);
++			++i;
++		}
++
++		m = m->m_next;
++
++		if (m == NULL) {
++			*nsegs = i;
++
++			return (0);
++		}
++	} while (i < TX_MAX_DMA_SEGS);
++
++	printf("%s: too many segments for tx mbuf chain\n", IF_CGEM_NAME);
++	return (EFBIG);
++}
++#endif /* __rtems__ */
++
++/* Start transmits. */
++static void
++cgem_start_locked(if_t ifp)
++{
++	struct cgem_softc *sc = (struct cgem_softc *) if_getsoftc(ifp);
++	struct mbuf *m;
++	bus_dma_segment_t segs[TX_MAX_DMA_SEGS];
++	uint32_t ctl;
++	int i, nsegs, wrap, err;
++
++	CGEM_ASSERT_LOCKED(sc);
++
++	if ((if_getdrvflags(ifp) & IFF_DRV_OACTIVE) != 0)
++		return;
++
++	for (;;) {
++		/* Check that there is room in the descriptor ring. */
++		if (sc->txring_queued >=
++		    CGEM_NUM_TX_DESCS - TX_MAX_DMA_SEGS * 2) {
++			/* Try to make room. */
++			cgem_clean_tx(sc);
++
++			/* Still no room? */
++			if (sc->txring_queued >=
++			    CGEM_NUM_TX_DESCS - TX_MAX_DMA_SEGS * 2) {
++				if_setdrvflagbits(ifp, IFF_DRV_OACTIVE, 0);
++				sc->txfull++;
++				break;
++			}
++		}
++
++		/* Grab next transmit packet. */
++		m = if_dequeue(ifp);
++		if (m == NULL)
++			break;
++
++#ifndef __rtems__
++		/* Create and load DMA map. */
++		if (bus_dmamap_create(sc->mbuf_dma_tag, 0,
++			&sc->txring_m_dmamap[sc->txring_hd_ptr])) {
++			m_freem(m);
++			sc->txdmamapfails++;
++			continue;
++		}
++		err = bus_dmamap_load_mbuf_sg(sc->mbuf_dma_tag,
++		    sc->txring_m_dmamap[sc->txring_hd_ptr], m, segs, &nsegs,
++		    BUS_DMA_NOWAIT);
++#else /* __rtems__ */
++		err = cgem_get_segs_for_tx(m, segs, &nsegs);
++#endif /* __rtems__ */
++		if (err == EFBIG) {
++			/* Too many segments!  defrag and try again. */
++			struct mbuf *m2 = m_defrag(m, M_NOWAIT);
++
++			if (m2 == NULL) {
++				sc->txdefragfails++;
++				m_freem(m);
++#ifndef __rtems__
++				bus_dmamap_destroy(sc->mbuf_dma_tag,
++				    sc->txring_m_dmamap[sc->txring_hd_ptr]);
++				sc->txring_m_dmamap[sc->txring_hd_ptr] = NULL;
++#endif /* __rtems__ */
++				continue;
++			}
++			m = m2;
++#ifndef __rtems__
++			err = bus_dmamap_load_mbuf_sg(sc->mbuf_dma_tag,
++			    sc->txring_m_dmamap[sc->txring_hd_ptr], m, segs,
++			    &nsegs, BUS_DMA_NOWAIT);
++#else /* __rtems__ */
++			err = cgem_get_segs_for_tx(m, segs, &nsegs);
++#endif /* __rtems__ */
++			sc->txdefrags++;
++		}
++		if (err) {
++			/* Give up. */
++			m_freem(m);
++#ifndef __rtems__
++			bus_dmamap_destroy(sc->mbuf_dma_tag,
++			    sc->txring_m_dmamap[sc->txring_hd_ptr]);
++			sc->txring_m_dmamap[sc->txring_hd_ptr] = NULL;
++#endif /* __rtems__ */
++			sc->txdmamapfails++;
++			continue;
++		}
++		sc->txring_m[sc->txring_hd_ptr] = m;
++
++#ifndef __rtems__
++		/* Sync tx buffer with cache. */
++		bus_dmamap_sync(sc->mbuf_dma_tag,
++		    sc->txring_m_dmamap[sc->txring_hd_ptr],
++		    BUS_DMASYNC_PREWRITE);
++#else /* __rtems__ */
++		rtems_cache_flush_multiple_data_lines(m->m_data, m->m_len);
++#endif /* __rtems__ */
++
++		/* Set wrap flag if next packet might run off end of ring. */
++		wrap = sc->txring_hd_ptr + nsegs + TX_MAX_DMA_SEGS >=
++		    CGEM_NUM_TX_DESCS;
++
++		/*
++		 * Fill in the TX descriptors back to front so that USED bit in
++		 * first descriptor is cleared last.
++		 */
++		for (i = nsegs - 1; i >= 0; i--) {
++			/* Descriptor address. */
++			sc->txring[sc->txring_hd_ptr + i].addr =
++			    segs[i].ds_addr;
++#ifdef CGEM64
++			sc->txring[sc->txring_hd_ptr + i].addrhi =
++			    segs[i].ds_addr >> 32;
++#endif
++			/* Descriptor control word. */
++			ctl = segs[i].ds_len;
++			if (i == nsegs - 1) {
++				ctl |= CGEM_TXDESC_LAST_BUF;
++				if (wrap)
++					ctl |= CGEM_TXDESC_WRAP;
++			}
++			sc->txring[sc->txring_hd_ptr + i].ctl = ctl;
++
++			if (i != 0)
++				sc->txring_m[sc->txring_hd_ptr + i] = NULL;
++		}
++
++		if (wrap)
++			sc->txring_hd_ptr = 0;
++		else
++			sc->txring_hd_ptr += nsegs;
++		sc->txring_queued += nsegs;
++
++		if (sc->version == 2) {
++			WR4(sc, CGEM_TAIL(0),
++				(1U << 31) | ((sc->txring_hd_ptr) & (CGEM_NUM_TX_DESCS - 1)));
++		}
++
++		/* Kick the transmitter. */
++		WR4(sc, CGEM_NET_CTRL, sc->net_ctl_shadow |
++		    CGEM_NET_CTRL_START_TX);
++
++		/* If there is a BPF listener, bounce a copy to him. */
++		ETHER_BPF_MTAP(ifp, m);
++	}
++}
++
++static void
++cgem_start(if_t ifp)
++{
++	struct cgem_softc *sc = (struct cgem_softc *) if_getsoftc(ifp);
++
++	CGEM_LOCK(sc);
++	cgem_start_locked(ifp);
++	CGEM_UNLOCK(sc);
++}
++
++static void
++cgem_poll_hw_stats(struct cgem_softc *sc)
++{
++	uint32_t n;
++
++	CGEM_ASSERT_LOCKED(sc);
++
++	sc->stats.tx_bytes += RD4(sc, CGEM_OCTETS_TX_BOT);
++	sc->stats.tx_bytes += (uint64_t)RD4(sc, CGEM_OCTETS_TX_TOP) << 32;
++
++	sc->stats.tx_frames += RD4(sc, CGEM_FRAMES_TX);
++	sc->stats.tx_frames_bcast += RD4(sc, CGEM_BCAST_FRAMES_TX);
++	sc->stats.tx_frames_multi += RD4(sc, CGEM_MULTI_FRAMES_TX);
++	sc->stats.tx_frames_pause += RD4(sc, CGEM_PAUSE_FRAMES_TX);
++	sc->stats.tx_frames_64b += RD4(sc, CGEM_FRAMES_64B_TX);
++	sc->stats.tx_frames_65to127b += RD4(sc, CGEM_FRAMES_65_127B_TX);
++	sc->stats.tx_frames_128to255b += RD4(sc, CGEM_FRAMES_128_255B_TX);
++	sc->stats.tx_frames_256to511b += RD4(sc, CGEM_FRAMES_256_511B_TX);
++	sc->stats.tx_frames_512to1023b += RD4(sc, CGEM_FRAMES_512_1023B_TX);
++	sc->stats.tx_frames_1024to1536b += RD4(sc, CGEM_FRAMES_1024_1518B_TX);
++	sc->stats.tx_under_runs += RD4(sc, CGEM_TX_UNDERRUNS);
++
++	n = RD4(sc, CGEM_SINGLE_COLL_FRAMES);
++	sc->stats.tx_single_collisn += n;
++	if_inc_counter(sc->ifp, IFCOUNTER_COLLISIONS, n);
++	n = RD4(sc, CGEM_MULTI_COLL_FRAMES);
++	sc->stats.tx_multi_collisn += n;
++	if_inc_counter(sc->ifp, IFCOUNTER_COLLISIONS, n);
++	n = RD4(sc, CGEM_EXCESSIVE_COLL_FRAMES);
++	sc->stats.tx_excsv_collisn += n;
++	if_inc_counter(sc->ifp, IFCOUNTER_COLLISIONS, n);
++	n = RD4(sc, CGEM_LATE_COLL);
++	sc->stats.tx_late_collisn += n;
++	if_inc_counter(sc->ifp, IFCOUNTER_COLLISIONS, n);
++
++	sc->stats.tx_deferred_frames += RD4(sc, CGEM_DEFERRED_TX_FRAMES);
++	sc->stats.tx_carrier_sense_errs += RD4(sc, CGEM_CARRIER_SENSE_ERRS);
++
++	sc->stats.rx_bytes += RD4(sc, CGEM_OCTETS_RX_BOT);
++	sc->stats.rx_bytes += (uint64_t)RD4(sc, CGEM_OCTETS_RX_TOP) << 32;
++
++	sc->stats.rx_frames += RD4(sc, CGEM_FRAMES_RX);
++	sc->stats.rx_frames_bcast += RD4(sc, CGEM_BCAST_FRAMES_RX);
++	sc->stats.rx_frames_multi += RD4(sc, CGEM_MULTI_FRAMES_RX);
++	sc->stats.rx_frames_pause += RD4(sc, CGEM_PAUSE_FRAMES_RX);
++	sc->stats.rx_frames_64b += RD4(sc, CGEM_FRAMES_64B_RX);
++	sc->stats.rx_frames_65to127b += RD4(sc, CGEM_FRAMES_65_127B_RX);
++	sc->stats.rx_frames_128to255b += RD4(sc, CGEM_FRAMES_128_255B_RX);
++	sc->stats.rx_frames_256to511b += RD4(sc, CGEM_FRAMES_256_511B_RX);
++	sc->stats.rx_frames_512to1023b += RD4(sc, CGEM_FRAMES_512_1023B_RX);
++	sc->stats.rx_frames_1024to1536b += RD4(sc, CGEM_FRAMES_1024_1518B_RX);
++	sc->stats.rx_frames_undersize += RD4(sc, CGEM_UNDERSZ_RX);
++	sc->stats.rx_frames_oversize += RD4(sc, CGEM_OVERSZ_RX);
++	sc->stats.rx_frames_jabber += RD4(sc, CGEM_JABBERS_RX);
++	sc->stats.rx_frames_fcs_errs += RD4(sc, CGEM_FCS_ERRS);
++	sc->stats.rx_frames_length_errs += RD4(sc, CGEM_LENGTH_FIELD_ERRS);
++	sc->stats.rx_symbol_errs += RD4(sc, CGEM_RX_SYMBOL_ERRS);
++	sc->stats.rx_align_errs += RD4(sc, CGEM_ALIGN_ERRS);
++	sc->stats.rx_resource_errs += RD4(sc, CGEM_RX_RESOURCE_ERRS);
++	sc->stats.rx_overrun_errs += RD4(sc, CGEM_RX_OVERRUN_ERRS);
++	sc->stats.rx_ip_hdr_csum_errs += RD4(sc, CGEM_IP_HDR_CKSUM_ERRS);
++	sc->stats.rx_tcp_csum_errs += RD4(sc, CGEM_TCP_CKSUM_ERRS);
++	sc->stats.rx_udp_csum_errs += RD4(sc, CGEM_UDP_CKSUM_ERRS);
++}
++
++static void
++cgem_tick(void *arg)
++{
++	struct cgem_softc *sc = (struct cgem_softc *)arg;
++	struct mii_data *mii;
++
++	CGEM_ASSERT_LOCKED(sc);
++
++	/* Poll the phy. */
++	if (sc->miibus != NULL) {
++		mii = device_get_softc(sc->miibus);
++		mii_tick(mii);
++	}
++
++	/* Poll statistics registers. */
++	cgem_poll_hw_stats(sc);
++
++	/* Check for receiver hang. */
++	if (sc->rxhangwar && sc->rx_frames_prev == sc->stats.rx_frames) {
++		/*
++		 * Reset receiver logic by toggling RX_EN bit.  1usec
++		 * delay is necessary especially when operating at 100mbps
++		 * and 10mbps speeds.
++		 */
++		WR4(sc, CGEM_NET_CTRL, sc->net_ctl_shadow &
++		    ~CGEM_NET_CTRL_RX_EN);
++		DELAY(1);
++		WR4(sc, CGEM_NET_CTRL, sc->net_ctl_shadow);
++	}
++	sc->rx_frames_prev = sc->stats.rx_frames;
++
++	/* Next callout in one second. */
++	callout_reset(&sc->tick_ch, hz, cgem_tick, sc);
++}
++
++/* Interrupt handler. */
++static void
++cgem_intr(void *arg)
++{
++	struct cgem_softc *sc = (struct cgem_softc *)arg;
++	if_t ifp = sc->ifp;
++	uint32_t istatus;
++	uint32_t txstat, rxstat;
++
++	CGEM_LOCK(sc);
++
++	if ((if_getdrvflags(ifp) & IFF_DRV_RUNNING) == 0) {
++		CGEM_UNLOCK(sc);
++		return;
++	}
++
++	/* Read interrupt status and immediately clear the bits. */
++	istatus = RD4(sc, CGEM_INTR_STAT);
++	WR4(sc, CGEM_INTR_STAT, istatus);
++
++	/* Check TX error */
++	if ((istatus & CGEM_INTR_TX_CORRUPT_AHB_ERR) ||
++		(istatus & CGEM_INTR_RETRY_EX_LATE_COLLISION) ||
++		(istatus & CGEM_INTR_TX_URUN)) {
++		txstat = RD4(sc, CGEM_TX_STAT);
++		WR4(sc, CGEM_TX_STAT, txstat);
++		printf("cgem_intr: txstat=0x%x\n", txstat);
++	}
++
++	/* Check RX error */
++	if ((istatus & CGEM_INTR_HRESP_NOT_OK) ||
++		(istatus & CGEM_INTR_RX_USED_READ) ||
++		(istatus & CGEM_INTR_RX_OVERRUN)) {
++		rxstat = RD4(sc, CGEM_RX_STAT);
++		WR4(sc, CGEM_RX_STAT, rxstat);
++		printf("cgem_intr: rxstat=0x%x\n", rxstat);
++	}
++
++	/* Packets received. */
++	if ((istatus & CGEM_INTR_RX_COMPLETE) != 0)
++		cgem_recv(sc);
++
++	/* Free up any completed transmit buffers. */
++	cgem_clean_tx(sc);
++
++	/* Hresp not ok.  Something is very bad with DMA.  Try to clear. */
++	if ((istatus & CGEM_INTR_HRESP_NOT_OK) != 0) {
++		device_printf(sc->dev,
++		    "cgem_intr: hresp not okay! rx_status=0x%x\n",
++		    RD4(sc, CGEM_RX_STAT));
++		WR4(sc, CGEM_RX_STAT, CGEM_RX_STAT_HRESP_NOT_OK);
++	}
++
++	/* Receiver overrun. */
++	if ((istatus & CGEM_INTR_RX_OVERRUN) != 0) {
++		/* Clear status bit. */
++		WR4(sc, CGEM_RX_STAT, CGEM_RX_STAT_OVERRUN);
++		sc->rxoverruns++;
++	}
++
++	/* Receiver ran out of bufs. */
++	if ((istatus & CGEM_INTR_RX_USED_READ) != 0) {
++		WR4(sc, CGEM_NET_CTRL, sc->net_ctl_shadow |
++		    CGEM_NET_CTRL_FLUSH_DPRAM_PKT);
++		cgem_fill_rqueue(sc);
++		sc->rxnobufs++;
++	}
++
++	/* Restart transmitter if needed. */
++	if (!if_sendq_empty(ifp))
++		cgem_start_locked(ifp);
++
++	CGEM_UNLOCK(sc);
++}
++
++/* Reset hardware. */
++static void
++cgem_reset(struct cgem_softc *sc)
++{
++
++	CGEM_ASSERT_LOCKED(sc);
++
++	/* Determine data bus width from design configuration register. */
++	switch (RD4(sc, CGEM_DESIGN_CFG1) &
++	    CGEM_DESIGN_CFG1_DMA_BUS_WIDTH_MASK) {
++	case CGEM_DESIGN_CFG1_DMA_BUS_WIDTH_64:
++		sc->net_cfg_shadow = CGEM_NET_CFG_DBUS_WIDTH_64;
++		break;
++	case CGEM_DESIGN_CFG1_DMA_BUS_WIDTH_128:
++		sc->net_cfg_shadow = CGEM_NET_CFG_DBUS_WIDTH_128;
++		break;
++	default:
++		sc->net_cfg_shadow = CGEM_NET_CFG_DBUS_WIDTH_32;
++	}
++
++	WR4(sc, CGEM_NET_CTRL, 0);
++	WR4(sc, CGEM_NET_CFG, sc->net_cfg_shadow);
++	WR4(sc, CGEM_NET_CTRL, CGEM_NET_CTRL_CLR_STAT_REGS);
++	WR4(sc, CGEM_TX_STAT, CGEM_TX_STAT_ALL);
++	WR4(sc, CGEM_RX_STAT, CGEM_RX_STAT_ALL);
++	WR4(sc, CGEM_INTR_DIS, CGEM_INTR_ALL);
++	WR4(sc, CGEM_HASH_BOT, 0);
++	WR4(sc, CGEM_HASH_TOP, 0);
++	WR4(sc, CGEM_TX_QBAR, 0);	/* manual says do this. */
++	WR4(sc, CGEM_RX_QBAR, 0);
++
++	/* Get management port running even if interface is down. */
++	sc->net_cfg_shadow |= CGEM_NET_CFG_MDC_CLK_DIV_48;
++	WR4(sc, CGEM_NET_CFG, sc->net_cfg_shadow);
++
++	sc->net_ctl_shadow = CGEM_NET_CTRL_MGMT_PORT_EN;
++	WR4(sc, CGEM_NET_CTRL, sc->net_ctl_shadow);
++
++	if (sc->version == 2) {
++		WR4(sc, CGEM_TAIL_ENABLE, 0x80000001);
++	}
++}
++
++/* Bring up the hardware. */
++static void
++cgem_config(struct cgem_softc *sc)
++{
++	if_t ifp = sc->ifp;
++	uint32_t dma_cfg;
++	u_char *eaddr = if_getlladdr(ifp);
++
++	CGEM_ASSERT_LOCKED(sc);
++
++	/* Program Net Config Register. */
++	sc->net_cfg_shadow &= (CGEM_NET_CFG_MDC_CLK_DIV_MASK |
++	    CGEM_NET_CFG_DBUS_WIDTH_MASK);
++	sc->net_cfg_shadow |= (CGEM_NET_CFG_FCS_REMOVE |
++	    CGEM_NET_CFG_RX_BUF_OFFSET(ETHER_ALIGN) |
++	    CGEM_NET_CFG_GIGE_EN | CGEM_NET_CFG_1536RXEN |
++	    CGEM_NET_CFG_FULL_DUPLEX | CGEM_NET_CFG_SPEED100);
++
++	/* Check connection type, enable SGMII bits if necessary. */
++	if (sc->phy_contype == MII_CONTYPE_SGMII) {
++		sc->net_cfg_shadow |= CGEM_NET_CFG_SGMII_EN;
++		sc->net_cfg_shadow |= CGEM_NET_CFG_PCS_SEL;
++	}
++
++	/* Enable receive checksum offloading? */
++	if ((if_getcapenable(ifp) & IFCAP_RXCSUM) != 0)
++		sc->net_cfg_shadow |=  CGEM_NET_CFG_RX_CHKSUM_OFFLD_EN;
++
++	WR4(sc, CGEM_NET_CFG, sc->net_cfg_shadow);
++
++	/* Program DMA Config Register. */
++	dma_cfg = CGEM_DMA_CFG_RX_BUF_SIZE(MCLBYTES) |
++	    CGEM_DMA_CFG_RX_PKTBUF_MEMSZ_SEL_8K |
++	    CGEM_DMA_CFG_TX_PKTBUF_MEMSZ_SEL |
++	    CGEM_DMA_CFG_AHB_FIXED_BURST_LEN_16 |
++#ifdef CGEM64
++	    CGEM_DMA_CFG_ADDR_BUS_64 |
++#endif
++	    CGEM_DMA_CFG_DISC_WHEN_NO_AHB;
++
++	/* Enable transmit checksum offloading? */
++	if ((if_getcapenable(ifp) & IFCAP_TXCSUM) != 0)
++		dma_cfg |= CGEM_DMA_CFG_CHKSUM_GEN_OFFLOAD_EN;
++
++	WR4(sc, CGEM_DMA_CFG, dma_cfg);
++
++	/* Write the rx and tx descriptor ring addresses to the QBAR regs. */
++	WR4(sc, CGEM_RX_QBAR, (uint32_t)sc->rxring_physaddr);
++	WR4(sc, CGEM_TX_QBAR, (uint32_t)sc->txring_physaddr);
++#ifdef CGEM64
++	WR4(sc, CGEM_RX_QBAR_HI, (uint32_t)(sc->rxring_physaddr >> 32));
++	WR4(sc, CGEM_TX_QBAR_HI, (uint32_t)(sc->txring_physaddr >> 32));
++#endif
++
++	/* Enable rx and tx. */
++	sc->net_ctl_shadow |= (CGEM_NET_CTRL_TX_EN | CGEM_NET_CTRL_RX_EN);
++	WR4(sc, CGEM_NET_CTRL, sc->net_ctl_shadow);
++
++	/* Set receive address in case it changed. */
++	WR4(sc, CGEM_SPEC_ADDR_LOW(0), (eaddr[3] << 24) |
++	    (eaddr[2] << 16) | (eaddr[1] << 8) | eaddr[0]);
++	WR4(sc, CGEM_SPEC_ADDR_HI(0), (eaddr[5] << 8) | eaddr[4]);
++
++	/* Set up interrupts. */
++	WR4(sc, CGEM_INTR_EN, CGEM_INTR_RX_COMPLETE | CGEM_INTR_RX_OVERRUN |
++	    CGEM_INTR_TX_USED_READ | CGEM_INTR_RX_USED_READ |
++	    CGEM_INTR_HRESP_NOT_OK);
++}
++
++/* Turn on interface and load up receive ring with buffers. */
++static void
++cgem_init_locked(struct cgem_softc *sc)
++{
++	struct mii_data *mii;
++
++	CGEM_ASSERT_LOCKED(sc);
++
++	if ((if_getdrvflags(sc->ifp) & IFF_DRV_RUNNING) != 0)
++		return;
++
++	cgem_config(sc);
++	cgem_fill_rqueue(sc);
++
++	if_setdrvflagbits(sc->ifp, IFF_DRV_RUNNING, IFF_DRV_OACTIVE);
++
++	if (sc->miibus != NULL) {
++		mii = device_get_softc(sc->miibus);
++		mii_mediachg(mii);
++	}
++
++	callout_reset(&sc->tick_ch, hz, cgem_tick, sc);
++}
++
++static void
++cgem_init(void *arg)
++{
++	struct cgem_softc *sc = (struct cgem_softc *)arg;
++
++	CGEM_LOCK(sc);
++	cgem_init_locked(sc);
++	CGEM_UNLOCK(sc);
++}
++
++/* Turn off interface.  Free up any buffers in transmit or receive queues. */
++static void
++cgem_stop(struct cgem_softc *sc)
++{
++	int i;
++
++	CGEM_ASSERT_LOCKED(sc);
++
++	callout_stop(&sc->tick_ch);
++
++	/* Shut down hardware. */
++	cgem_reset(sc);
++
++	/* Clear out transmit queue. */
++	memset(sc->txring, 0, CGEM_NUM_TX_DESCS * sizeof(struct cgem_tx_desc));
++	for (i = 0; i < CGEM_NUM_TX_DESCS; i++) {
++		sc->txring[i].ctl = CGEM_TXDESC_USED;
++		if (sc->txring_m[i]) {
++#ifndef __rtems__
++			/* Unload and destroy dmamap. */
++			bus_dmamap_unload(sc->mbuf_dma_tag,
++			    sc->txring_m_dmamap[i]);
++			bus_dmamap_destroy(sc->mbuf_dma_tag,
++			    sc->txring_m_dmamap[i]);
++			sc->txring_m_dmamap[i] = NULL;
++#endif /* __rtems__ */
++			m_freem(sc->txring_m[i]);
++			sc->txring_m[i] = NULL;
++		}
++	}
++	sc->txring[CGEM_NUM_TX_DESCS - 1].ctl |= CGEM_TXDESC_WRAP;
++
++	sc->txring_hd_ptr = 0;
++	sc->txring_tl_ptr = 0;
++	sc->txring_queued = 0;
++
++	/* Clear out receive queue. */
++	memset(sc->rxring, 0, CGEM_NUM_RX_DESCS * sizeof(struct cgem_rx_desc));
++	for (i = 0; i < CGEM_NUM_RX_DESCS; i++) {
++		sc->rxring[i].addr = CGEM_RXDESC_OWN;
++		if (sc->rxring_m[i]) {
++#ifndef __rtems__
++			/* Unload and destroy dmamap. */
++			bus_dmamap_unload(sc->mbuf_dma_tag,
++			    sc->rxring_m_dmamap[i]);
++			bus_dmamap_destroy(sc->mbuf_dma_tag,
++			    sc->rxring_m_dmamap[i]);
++			sc->rxring_m_dmamap[i] = NULL;
++#endif /* __rtems__ */
++			m_freem(sc->rxring_m[i]);
++			sc->rxring_m[i] = NULL;
++		}
++	}
++	sc->rxring[CGEM_NUM_RX_DESCS - 1].addr |= CGEM_RXDESC_WRAP;
++
++	sc->rxring_hd_ptr = 0;
++	sc->rxring_tl_ptr = 0;
++	sc->rxring_queued = 0;
++
++	/* Force next statchg or linkchg to program net config register. */
++	sc->mii_media_active = 0;
++}
++
++static int
++cgem_ioctl(if_t ifp, u_long cmd, caddr_t data)
++{
++	struct cgem_softc *sc = if_getsoftc(ifp);
++	struct ifreq *ifr = (struct ifreq *)data;
++	struct mii_data *mii;
++	int error = 0, mask;
++
++	switch (cmd) {
++	case SIOCSIFFLAGS:
++		CGEM_LOCK(sc);
++		if ((if_getflags(ifp) & IFF_UP) != 0) {
++			if ((if_getdrvflags(ifp) & IFF_DRV_RUNNING) != 0) {
++				if (((if_getflags(ifp) ^ sc->if_old_flags) &
++				    (IFF_PROMISC | IFF_ALLMULTI)) != 0) {
++					cgem_rx_filter(sc);
++				}
++			} else {
++				cgem_init_locked(sc);
++			}
++		} else if ((if_getdrvflags(ifp) & IFF_DRV_RUNNING) != 0) {
++			if_setdrvflagbits(ifp, 0, IFF_DRV_RUNNING);
++			cgem_stop(sc);
++		}
++		sc->if_old_flags = if_getflags(ifp);
++		CGEM_UNLOCK(sc);
++		break;
++
++	case SIOCADDMULTI:
++	case SIOCDELMULTI:
++		/* Set up multi-cast filters. */
++		if ((if_getdrvflags(ifp) & IFF_DRV_RUNNING) != 0) {
++			CGEM_LOCK(sc);
++			cgem_rx_filter(sc);
++			CGEM_UNLOCK(sc);
++		}
++		break;
++
++	case SIOCSIFMEDIA:
++	case SIOCGIFMEDIA:
++		if (sc->miibus == NULL)
++			return (ENXIO);
++		mii = device_get_softc(sc->miibus);
++		error = ifmedia_ioctl(ifp, ifr, &mii->mii_media, cmd);
++		break;
++
++	case SIOCSIFCAP:
++		CGEM_LOCK(sc);
++		mask = if_getcapenable(ifp) ^ ifr->ifr_reqcap;
++
++		if ((mask & IFCAP_TXCSUM) != 0) {
++			if ((ifr->ifr_reqcap & IFCAP_TXCSUM) != 0) {
++				/* Turn on TX checksumming. */
++				if_setcapenablebit(ifp, IFCAP_TXCSUM |
++				    IFCAP_TXCSUM_IPV6, 0);
++				if_sethwassistbits(ifp, CGEM_CKSUM_ASSIST, 0);
++
++				WR4(sc, CGEM_DMA_CFG,
++				    RD4(sc, CGEM_DMA_CFG) |
++				    CGEM_DMA_CFG_CHKSUM_GEN_OFFLOAD_EN);
++			} else {
++				/* Turn off TX checksumming. */
++				if_setcapenablebit(ifp, 0, IFCAP_TXCSUM |
++				    IFCAP_TXCSUM_IPV6);
++				if_sethwassistbits(ifp, 0, CGEM_CKSUM_ASSIST);
++
++				WR4(sc, CGEM_DMA_CFG,
++				    RD4(sc, CGEM_DMA_CFG) &
++				    ~CGEM_DMA_CFG_CHKSUM_GEN_OFFLOAD_EN);
++			}
++		}
++		if ((mask & IFCAP_RXCSUM) != 0) {
++			if ((ifr->ifr_reqcap & IFCAP_RXCSUM) != 0) {
++				/* Turn on RX checksumming. */
++				if_setcapenablebit(ifp, IFCAP_RXCSUM |
++				    IFCAP_RXCSUM_IPV6, 0);
++				sc->net_cfg_shadow |=
++				    CGEM_NET_CFG_RX_CHKSUM_OFFLD_EN;
++				WR4(sc, CGEM_NET_CFG, sc->net_cfg_shadow);
++			} else {
++				/* Turn off RX checksumming. */
++				if_setcapenablebit(ifp, 0, IFCAP_RXCSUM |
++				    IFCAP_RXCSUM_IPV6);
++				sc->net_cfg_shadow &=
++				    ~CGEM_NET_CFG_RX_CHKSUM_OFFLD_EN;
++				WR4(sc, CGEM_NET_CFG, sc->net_cfg_shadow);
++			}
++		}
++		if ((if_getcapenable(ifp) & (IFCAP_RXCSUM | IFCAP_TXCSUM)) ==
++		    (IFCAP_RXCSUM | IFCAP_TXCSUM))
++			if_setcapenablebit(ifp, IFCAP_VLAN_HWCSUM, 0);
++		else
++			if_setcapenablebit(ifp, 0, IFCAP_VLAN_HWCSUM);
++
++		CGEM_UNLOCK(sc);
++		break;
++	default:
++		error = ether_ioctl(ifp, cmd, data);
++		break;
++	}
++
++	return (error);
++}
++
++/* MII bus support routines.
++ */
++static int
++cgem_ifmedia_upd(if_t ifp)
++{
++	struct cgem_softc *sc = (struct cgem_softc *) if_getsoftc(ifp);
++	struct mii_data *mii;
++	struct mii_softc *miisc;
++	int error = 0;
++
++	mii = device_get_softc(sc->miibus);
++	CGEM_LOCK(sc);
++	if ((if_getflags(ifp) & IFF_UP) != 0) {
++		LIST_FOREACH(miisc, &mii->mii_phys, mii_list)
++			PHY_RESET(miisc);
++		error = mii_mediachg(mii);
++	}
++	CGEM_UNLOCK(sc);
++
++	return (error);
++}
++
++static void
++cgem_ifmedia_sts(if_t ifp, struct ifmediareq *ifmr)
++{
++	struct cgem_softc *sc = (struct cgem_softc *) if_getsoftc(ifp);
++	struct mii_data *mii;
++
++	mii = device_get_softc(sc->miibus);
++	CGEM_LOCK(sc);
++	mii_pollstat(mii);
++	ifmr->ifm_active = mii->mii_media_active;
++	ifmr->ifm_status = mii->mii_media_status;
++	CGEM_UNLOCK(sc);
++}
++
++static int
++cgem_miibus_readreg(device_t dev, int phy, int reg)
++{
++	struct cgem_softc *sc = device_get_softc(dev);
++	int tries, val;
++
++	WR4(sc, CGEM_PHY_MAINT, CGEM_PHY_MAINT_CLAUSE_22 |
++	    CGEM_PHY_MAINT_MUST_10 | CGEM_PHY_MAINT_OP_READ |
++	    (phy << CGEM_PHY_MAINT_PHY_ADDR_SHIFT) |
++	    (reg << CGEM_PHY_MAINT_REG_ADDR_SHIFT));
++
++	/* Wait for completion. */
++	tries=0;
++	while ((RD4(sc, CGEM_NET_STAT) & CGEM_NET_STAT_PHY_MGMT_IDLE) == 0) {
++		DELAY(5);
++		if (++tries > 200) {
++			device_printf(dev, "phy read timeout: %d\n", reg);
++			return (-1);
++		}
++	}
++
++	val = RD4(sc, CGEM_PHY_MAINT) & CGEM_PHY_MAINT_DATA_MASK;
++
++	if (reg == MII_EXTSR)
++		/*
++		 * MAC does not support half-duplex at gig speeds.
++		 * Let mii(4) exclude the capability.
++		 */
++		val &= ~(EXTSR_1000XHDX | EXTSR_1000THDX);
++
++	return (val);
++}
++
++static int
++cgem_miibus_writereg(device_t dev, int phy, int reg, int data)
++{
++	struct cgem_softc *sc = device_get_softc(dev);
++	int tries;
++
++	WR4(sc, CGEM_PHY_MAINT, CGEM_PHY_MAINT_CLAUSE_22 |
++	    CGEM_PHY_MAINT_MUST_10 | CGEM_PHY_MAINT_OP_WRITE |
++	    (phy << CGEM_PHY_MAINT_PHY_ADDR_SHIFT) |
++	    (reg << CGEM_PHY_MAINT_REG_ADDR_SHIFT) |
++	    (data & CGEM_PHY_MAINT_DATA_MASK));
++
++	/* Wait for completion. */
++	tries = 0;
++	while ((RD4(sc, CGEM_NET_STAT) & CGEM_NET_STAT_PHY_MGMT_IDLE) == 0) {
++		DELAY(5);
++		if (++tries > 200) {
++			device_printf(dev, "phy write timeout: %d\n", reg);
++			return (-1);
++		}
++	}
++
++	return (0);
++}
++
++static void
++cgem_miibus_statchg(device_t dev)
++{
++	struct cgem_softc *sc  = device_get_softc(dev);
++	struct mii_data *mii = device_get_softc(sc->miibus);
++
++	CGEM_ASSERT_LOCKED(sc);
++
++	if ((mii->mii_media_status & (IFM_ACTIVE | IFM_AVALID)) ==
++	    (IFM_ACTIVE | IFM_AVALID) &&
++	    sc->mii_media_active != mii->mii_media_active) {
++			cgem_mediachange(sc, mii);
++	}
++}
++
++static void
++cgem_miibus_linkchg(device_t dev)
++{
++	struct cgem_softc *sc  = device_get_softc(dev);
++	struct mii_data *mii = device_get_softc(sc->miibus);
++
++	CGEM_ASSERT_LOCKED(sc);
++
++	if ((mii->mii_media_status & (IFM_ACTIVE | IFM_AVALID)) ==
++	    (IFM_ACTIVE | IFM_AVALID) &&
++	    sc->mii_media_active != mii->mii_media_active) {
++			cgem_mediachange(sc, mii);
++	}
++}
++
++/*
++ * Overridable weak symbol cgem_set_ref_clk().  This allows platforms to
++ * provide a function to set the cgem's reference clock.
++ */
++static int __used
++cgem_default_set_ref_clk(int unit, int frequency)
++{
++
++	return 0;
++}
++__weak_reference(cgem_default_set_ref_clk, cgem_set_ref_clk);
++
++static int
++cgem_1p0_set_ref_clk(struct cgem_softc *sc, int interface_type,
++    int interface_speed)
++{
++	uint32_t reg_value;
++	uint32_t set_speed = 0;
++
++	/* TODO: 10GBASER/USXGMII/5GBASER/2500BASEX */
++	if (interface_type == MII_CONTYPE_SGMII) {
++		if (interface_speed == 1000) {
++			WR4(sc, 0x1c04, 0x1); /*0x1c04*/
++			WR4(sc, 0x1c08, 0x4); /*0x1c08*/
++			WR4(sc, 0x1c0c, 0x8); /*0x1c0c*/
++			WR4(sc, 0x1c10, 0x1); /*0x1c10*/
++			WR4(sc, 0x1c20, 0x0); /*0x1c20*/
++			WR4(sc, 0x1c24, 0x0); /*0x1c24*/
++			WR4(sc, 0x1c28, 0x0); /*0x1c28*/
++			WR4(sc, 0x1c2c, 0x1); /*0x1c2c*/
++			WR4(sc, 0x1c30, 0x1); /*0x1c30*/
++			WR4(sc, 0x1c34, 0x0); /*0x1c34*/
++			WR4(sc, 0x1c70, 0x0); /*0x1c70*/
++			WR4(sc, 0x1c74, 0x0); /*0x1c74*/
++			WR4(sc, 0x1c78, 0x0); /*0x1c78*/
++			WR4(sc, 0x1c7c, 0x0); /*0x1c7c*/
++		} else if (interface_speed == 100 ||
++		    interface_speed == 10) {
++			WR4(sc, 0x1c04, 0x1); /*0x1c04*/
++			WR4(sc, 0x1c08, 0x4); /*0x1c08*/
++			WR4(sc, 0x1c0c, 0x8); /*0x1c0c*/
++			WR4(sc, 0x1c10, 0x1); /*0x1c10*/
++			WR4(sc, 0x1c20, 0x0); /*0x1c20*/
++			WR4(sc, 0x1c24, 0x0); /*0x1c24*/
++			WR4(sc, 0x1c28, 0x1); /*0x1c28*/
++			WR4(sc, 0x1c2c, 0x1); /*0x1c2c*/
++			WR4(sc, 0x1c30, 0x1); /*0x1c30*/
++			WR4(sc, 0x1c34, 0x0); /*0x1c34*/
++			WR4(sc, 0x1c70, 0x1); /*0x1c70*/
++			WR4(sc, 0x1c74, 0x0); /*0x1c74*/
++			WR4(sc, 0x1c78, 0x0); /*0x1c78*/
++			WR4(sc, 0x1c7c, 0x1); /*0x1c7c*/
++		}
++	} else if ((interface_type == MII_CONTYPE_RGMII) ||
++	    (interface_type == MII_CONTYPE_RGMII_ID)) {
++		if (interface_speed == 1000) {
++			WR4(sc, 0x1c18, 0x1); /*0x1c18*/
++			WR4(sc, 0x1c1c, 0x0); /*0x1c1c*/
++			WR4(sc, 0x1c20, 0x0); /*0x1c20*/
++			WR4(sc, 0x1c24, 0x1); /*0x1c24*/
++			WR4(sc, 0x1c28, 0x0); /*0x1c28*/
++			WR4(sc, 0x1c2c, 0x0); /*0x1c2c*/
++			WR4(sc, 0x1c30, 0x0); /*0x1c30*/
++			WR4(sc, 0x1c34, 0x1); /*0x1c34*/
++			WR4(sc, 0x1c38, 0x0); /*0x1c38*/
++			WR4(sc, 0x1c48, 0x1); /*0x1c48*/
++			WR4(sc, 0x1c80, 0x1); /*0x1c80*/
++			WR4(sc, 0x1c84, 0x0); /*0x1c84*/
++		} else if (interface_speed == 100) {
++			WR4(sc, 0x1c18, 0x1); /*0x1c18*/
++			WR4(sc, 0x1c1c, 0x0); /*0x1c1c*/
++			WR4(sc, 0x1c20, 0x0); /*0x1c20*/
++			WR4(sc, 0x1c24, 0x1); /*0x1c24*/
++			WR4(sc, 0x1c28, 0x0); /*0x1c28*/
++			WR4(sc, 0x1c2c, 0x0); /*0x1c2c*/
++			WR4(sc, 0x1c30, 0x0); /*0x1c30*/
++			WR4(sc, 0x1c34, 0x1); /*0x1c34*/
++			WR4(sc, 0x1c38, 0x0); /*0x1c38*/
++			WR4(sc, 0x1c48, 0x1); /*0x1c48*/
++			WR4(sc, 0x1c80, 0x0); /*0x1c80*/
++			WR4(sc, 0x1c84, 0x0); /*0x1c84*/
++		} else {
++			WR4(sc, 0x1c18, 0x1); /*0x1c18*/
++			WR4(sc, 0x1c1c, 0x0); /*0x1c1c*/
++			WR4(sc, 0x1c20, 0x0); /*0x1c20*/
++			WR4(sc, 0x1c24, 0x1); /*0x1c24*/
++			WR4(sc, 0x1c28, 0x0); /*0x1c28*/
++			WR4(sc, 0x1c2c, 0x0); /*0x1c2c*/
++			WR4(sc, 0x1c30, 0x0); /*0x1c30*/
++			WR4(sc, 0x1c34, 0x1); /*0x1c34*/
++			WR4(sc, 0x1c38, 0x1); /*0x1c38*/
++			WR4(sc, 0x1c48, 0x1); /*0x1c48*/
++			WR4(sc, 0x1c80, 0x0); /*0x1c80*/
++			WR4(sc, 0x1c84, 0x0); /*0x1c84*/
++		}
++	} else if (interface_type == MII_CONTYPE_RMII) {
++		WR4(sc, 0x1c48, 0x1); /*0x1c48*/
++	}
++
++	if (interface_speed == 100)
++		set_speed = 0;
++	else if (interface_speed == 1000)
++		set_speed = 1;
++	else if (interface_speed == 2500)
++		set_speed = 2;
++	else if (interface_speed == 5000)
++		set_speed = 3;
++	else if (interface_speed == 10000)
++		set_speed = 4;
++
++	/* GEM_HSMAC(0x0050) provide rate to the external */
++	reg_value = RD4(sc, CGEM_HSMAC);
++	reg_value &= ~CGEM_HSMACSPEED_MASK;
++	reg_value |= (set_speed)&CGEM_HSMACSPEED_MASK;
++	WR4(sc, CGEM_HSMAC, reg_value);
++
++	return 0;
++}
++
++static int
++cgem_2p0_set_ref_clk(struct cgem_softc *sc, int interface_type,
++    int interface_speed)
++{
++	uint32_t reg_value;
++	uint32_t set_speed = 0;
++
++	if (interface_type == MII_CONTYPE_SGMII) {
++		if (interface_speed == 1000) {
++			set_speed = 1; /* HS_SPEED_1000M */
++		} else if ((interface_speed == 100) || (interface_speed == 10)) {
++			set_speed = 0; /* HS_SPEED_100M */
++		}
++	}
++
++	/* GEM_HSMAC(0x0050) provide rate to the external */
++	reg_value = RD4(sc, CGEM_HSMAC);
++	reg_value &= ~CGEM_HSMACSPEED_MASK;
++	reg_value |= (set_speed)&CGEM_HSMACSPEED_MASK;
++	WR4(sc, CGEM_HSMAC, reg_value);
++
++	return 0;
++}
++
++/* Call to set reference clock and network config bits according to media. */
++static void
++cgem_mediachange(struct cgem_softc *sc, struct mii_data *mii)
++{
++	int interface_speed = 1000;
++
++	CGEM_ASSERT_LOCKED(sc);
++
++	/* Update hardware to reflect media. */
++	sc->net_cfg_shadow &= ~(CGEM_NET_CFG_SPEED100 | CGEM_NET_CFG_GIGE_EN |
++	    CGEM_NET_CFG_FULL_DUPLEX);
++
++	switch (IFM_SUBTYPE(mii->mii_media_active)) {
++	case IFM_1000_T:
++		sc->net_cfg_shadow |= (CGEM_NET_CFG_SPEED100 |
++		    CGEM_NET_CFG_GIGE_EN);
++		interface_speed = 1000;
++		break;
++	case IFM_100_TX:
++		sc->net_cfg_shadow |= CGEM_NET_CFG_SPEED100;
++		interface_speed = 100;
++		break;
++	default:
++		break;
++	}
++
++	if ((mii->mii_media_active & IFM_FDX) != 0)
++		sc->net_cfg_shadow |= CGEM_NET_CFG_FULL_DUPLEX;
++
++	WR4(sc, CGEM_NET_CFG, sc->net_cfg_shadow);
++
++	/* Set the reference clock if necessary. */
++	CGEM_UNLOCK(sc);
++	if (sc->version == 1) {
++		if (cgem_1p0_set_ref_clk(sc, sc->phy_contype, interface_speed)) {
++			device_printf(sc->dev,
++				"cgem_mediachange(v1): "
++				"could not set ref clk for speed %d.\n",
++				interface_speed);
++		}
++	} else if (sc->version == 2) {
++		if (cgem_2p0_set_ref_clk(sc, sc->phy_contype,
++		    interface_speed)) {
++			device_printf(sc->dev,
++			    "cgem_mediachange(v2): "
++			    "could not set ref clk for speed %d.\n",
++			    interface_speed);
++		}
++	} else {
++		panic("cgem_mediachange: unknown version");
++	}
++	CGEM_LOCK(sc);
++
++	sc->mii_media_active = mii->mii_media_active;
++}
++
++static void
++cgem_add_sysctls(device_t dev)
++{
++	struct cgem_softc *sc = device_get_softc(dev);
++	struct sysctl_ctx_list *ctx;
++	struct sysctl_oid_list *child;
++	struct sysctl_oid *tree;
++
++	ctx = device_get_sysctl_ctx(dev);
++	child = SYSCTL_CHILDREN(device_get_sysctl_tree(dev));
++
++	SYSCTL_ADD_INT(ctx, child, OID_AUTO, "rxbufs", CTLFLAG_RW,
++	    &sc->rxbufs, 0, "Number receive buffers to provide");
++
++	SYSCTL_ADD_INT(ctx, child, OID_AUTO, "rxhangwar", CTLFLAG_RW,
++	    &sc->rxhangwar, 0, "Enable receive hang work-around");
++
++	SYSCTL_ADD_UINT(ctx, child, OID_AUTO, "_rxoverruns", CTLFLAG_RD,
++	    &sc->rxoverruns, 0, "Receive overrun events");
++
++	SYSCTL_ADD_UINT(ctx, child, OID_AUTO, "_rxnobufs", CTLFLAG_RD,
++	    &sc->rxnobufs, 0, "Receive buf queue empty events");
++
++	SYSCTL_ADD_UINT(ctx, child, OID_AUTO, "_rxdmamapfails", CTLFLAG_RD,
++	    &sc->rxdmamapfails, 0, "Receive DMA map failures");
++
++	SYSCTL_ADD_UINT(ctx, child, OID_AUTO, "_txfull", CTLFLAG_RD,
++	    &sc->txfull, 0, "Transmit ring full events");
++
++	SYSCTL_ADD_UINT(ctx, child, OID_AUTO, "_txdmamapfails", CTLFLAG_RD,
++	    &sc->txdmamapfails, 0, "Transmit DMA map failures");
++
++	SYSCTL_ADD_UINT(ctx, child, OID_AUTO, "_txdefrags", CTLFLAG_RD,
++	    &sc->txdefrags, 0, "Transmit m_defrag() calls");
++
++	SYSCTL_ADD_UINT(ctx, child, OID_AUTO, "_txdefragfails", CTLFLAG_RD,
++	    &sc->txdefragfails, 0, "Transmit m_defrag() failures");
++
++	tree = SYSCTL_ADD_NODE(ctx, child, OID_AUTO, "stats",
++	    CTLFLAG_RD | CTLFLAG_MPSAFE, NULL, "GEM statistics");
++	child = SYSCTL_CHILDREN(tree);
++
++	SYSCTL_ADD_UQUAD(ctx, child, OID_AUTO, "tx_bytes", CTLFLAG_RD,
++	    &sc->stats.tx_bytes, "Total bytes transmitted");
++
++	SYSCTL_ADD_UINT(ctx, child, OID_AUTO, "tx_frames", CTLFLAG_RD,
++	    &sc->stats.tx_frames, 0, "Total frames transmitted");
++
++	SYSCTL_ADD_UINT(ctx, child, OID_AUTO, "tx_frames_bcast", CTLFLAG_RD,
++	    &sc->stats.tx_frames_bcast, 0,
++	    "Number broadcast frames transmitted");
++
++	SYSCTL_ADD_UINT(ctx, child, OID_AUTO, "tx_frames_multi", CTLFLAG_RD,
++	    &sc->stats.tx_frames_multi, 0,
++	    "Number multicast frames transmitted");
++
++	SYSCTL_ADD_UINT(ctx, child, OID_AUTO, "tx_frames_pause",
++	    CTLFLAG_RD, &sc->stats.tx_frames_pause, 0,
++	    "Number pause frames transmitted");
++
++	SYSCTL_ADD_UINT(ctx, child, OID_AUTO, "tx_frames_64b", CTLFLAG_RD,
++	    &sc->stats.tx_frames_64b, 0,
++	    "Number frames transmitted of size 64 bytes or less");
++
++	SYSCTL_ADD_UINT(ctx, child, OID_AUTO, "tx_frames_65to127b", CTLFLAG_RD,
++	    &sc->stats.tx_frames_65to127b, 0,
++	    "Number frames transmitted of size 65-127 bytes");
++
++	SYSCTL_ADD_UINT(ctx, child, OID_AUTO, "tx_frames_128to255b",
++	    CTLFLAG_RD, &sc->stats.tx_frames_128to255b, 0,
++	    "Number frames transmitted of size 128-255 bytes");
++
++	SYSCTL_ADD_UINT(ctx, child, OID_AUTO, "tx_frames_256to511b",
++	    CTLFLAG_RD, &sc->stats.tx_frames_256to511b, 0,
++	    "Number frames transmitted of size 256-511 bytes");
++
++	SYSCTL_ADD_UINT(ctx, child, OID_AUTO, "tx_frames_512to1023b",
++	    CTLFLAG_RD, &sc->stats.tx_frames_512to1023b, 0,
++	    "Number frames transmitted of size 512-1023 bytes");
++
++	SYSCTL_ADD_UINT(ctx, child, OID_AUTO, "tx_frames_1024to1536b",
++	    CTLFLAG_RD, &sc->stats.tx_frames_1024to1536b, 0,
++	    "Number frames transmitted of size 1024-1536 bytes");
++
++	SYSCTL_ADD_UINT(ctx, child, OID_AUTO, "tx_under_runs",
++	    CTLFLAG_RD, &sc->stats.tx_under_runs, 0,
++	    "Number transmit under-run events");
++
++	SYSCTL_ADD_UINT(ctx, child, OID_AUTO, "tx_single_collisn",
++	    CTLFLAG_RD, &sc->stats.tx_single_collisn, 0,
++	    "Number single-collision transmit frames");
++
++	SYSCTL_ADD_UINT(ctx, child, OID_AUTO, "tx_multi_collisn",
++	    CTLFLAG_RD, &sc->stats.tx_multi_collisn, 0,
++	    "Number multi-collision transmit frames");
++
++	SYSCTL_ADD_UINT(ctx, child, OID_AUTO, "tx_excsv_collisn",
++	    CTLFLAG_RD, &sc->stats.tx_excsv_collisn, 0,
++	    "Number excessive collision transmit frames");
++
++	SYSCTL_ADD_UINT(ctx, child, OID_AUTO, "tx_late_collisn",
++	    CTLFLAG_RD, &sc->stats.tx_late_collisn, 0,
++	    "Number late-collision transmit frames");
++
++	SYSCTL_ADD_UINT(ctx, child, OID_AUTO, "tx_deferred_frames",
++	    CTLFLAG_RD, &sc->stats.tx_deferred_frames, 0,
++	    "Number deferred transmit frames");
++
++	SYSCTL_ADD_UINT(ctx, child, OID_AUTO, "tx_carrier_sense_errs",
++	    CTLFLAG_RD, &sc->stats.tx_carrier_sense_errs, 0,
++	    "Number carrier sense errors on transmit");
++
++	SYSCTL_ADD_UQUAD(ctx, child, OID_AUTO, "rx_bytes", CTLFLAG_RD,
++	    &sc->stats.rx_bytes, "Total bytes received");
++
++	SYSCTL_ADD_UINT(ctx, child, OID_AUTO, "rx_frames", CTLFLAG_RD,
++	    &sc->stats.rx_frames, 0, "Total frames received");
++
++	SYSCTL_ADD_UINT(ctx, child, OID_AUTO, "rx_frames_bcast",
++	    CTLFLAG_RD, &sc->stats.rx_frames_bcast, 0,
++	    "Number broadcast frames received");
++
++	SYSCTL_ADD_UINT(ctx, child, OID_AUTO, "rx_frames_multi",
++	    CTLFLAG_RD, &sc->stats.rx_frames_multi, 0,
++	    "Number multicast frames received");
++
++	SYSCTL_ADD_UINT(ctx, child, OID_AUTO, "rx_frames_pause",
++	    CTLFLAG_RD, &sc->stats.rx_frames_pause, 0,
++	    "Number pause frames received");
++
++	SYSCTL_ADD_UINT(ctx, child, OID_AUTO, "rx_frames_64b",
++	    CTLFLAG_RD, &sc->stats.rx_frames_64b, 0,
++	    "Number frames received of size 64 bytes or less");
++
++	SYSCTL_ADD_UINT(ctx, child, OID_AUTO, "rx_frames_65to127b",
++	    CTLFLAG_RD, &sc->stats.rx_frames_65to127b, 0,
++	    "Number frames received of size 65-127 bytes");
++
++	SYSCTL_ADD_UINT(ctx, child, OID_AUTO, "rx_frames_128to255b",
++	    CTLFLAG_RD, &sc->stats.rx_frames_128to255b, 0,
++	    "Number frames received of size 128-255 bytes");
++
++	SYSCTL_ADD_UINT(ctx, child, OID_AUTO, "rx_frames_256to511b",
++	    CTLFLAG_RD, &sc->stats.rx_frames_256to511b, 0,
++	    "Number frames received of size 256-511 bytes");
++
++	SYSCTL_ADD_UINT(ctx, child, OID_AUTO, "rx_frames_512to1023b",
++	    CTLFLAG_RD, &sc->stats.rx_frames_512to1023b, 0,
++	    "Number frames received of size 512-1023 bytes");
++
++	SYSCTL_ADD_UINT(ctx, child, OID_AUTO, "rx_frames_1024to1536b",
++	    CTLFLAG_RD, &sc->stats.rx_frames_1024to1536b, 0,
++	    "Number frames received of size 1024-1536 bytes");
++
++	SYSCTL_ADD_UINT(ctx, child, OID_AUTO, "rx_frames_undersize",
++	    CTLFLAG_RD, &sc->stats.rx_frames_undersize, 0,
++	    "Number undersize frames received");
++
++	SYSCTL_ADD_UINT(ctx, child, OID_AUTO, "rx_frames_oversize",
++	    CTLFLAG_RD, &sc->stats.rx_frames_oversize, 0,
++	    "Number oversize frames received");
++
++	SYSCTL_ADD_UINT(ctx, child, OID_AUTO, "rx_frames_jabber",
++	    CTLFLAG_RD, &sc->stats.rx_frames_jabber, 0,
++	    "Number jabber frames received");
++
++	SYSCTL_ADD_UINT(ctx, child, OID_AUTO, "rx_frames_fcs_errs",
++	    CTLFLAG_RD, &sc->stats.rx_frames_fcs_errs, 0,
++	    "Number frames received with FCS errors");
++
++	SYSCTL_ADD_UINT(ctx, child, OID_AUTO, "rx_frames_length_errs",
++	    CTLFLAG_RD, &sc->stats.rx_frames_length_errs, 0,
++	    "Number frames received with length errors");
++
++	SYSCTL_ADD_UINT(ctx, child, OID_AUTO, "rx_symbol_errs",
++	    CTLFLAG_RD, &sc->stats.rx_symbol_errs, 0,
++	    "Number receive symbol errors");
++
++	SYSCTL_ADD_UINT(ctx, child, OID_AUTO, "rx_align_errs",
++	    CTLFLAG_RD, &sc->stats.rx_align_errs, 0,
++	    "Number receive alignment errors");
++
++	SYSCTL_ADD_UINT(ctx, child, OID_AUTO, "rx_resource_errs",
++	    CTLFLAG_RD, &sc->stats.rx_resource_errs, 0,
++	    "Number frames received when no rx buffer available");
++
++	SYSCTL_ADD_UINT(ctx, child, OID_AUTO, "rx_overrun_errs",
++	    CTLFLAG_RD, &sc->stats.rx_overrun_errs, 0,
++	    "Number frames received but not copied due to receive overrun");
++
++	SYSCTL_ADD_UINT(ctx, child, OID_AUTO, "rx_frames_ip_hdr_csum_errs",
++	    CTLFLAG_RD, &sc->stats.rx_ip_hdr_csum_errs, 0,
++	    "Number frames received with IP header checksum errors");
++
++	SYSCTL_ADD_UINT(ctx, child, OID_AUTO, "rx_frames_tcp_csum_errs",
++	    CTLFLAG_RD, &sc->stats.rx_tcp_csum_errs, 0,
++	    "Number frames received with TCP checksum errors");
++
++	SYSCTL_ADD_UINT(ctx, child, OID_AUTO, "rx_frames_udp_csum_errs",
++	    CTLFLAG_RD, &sc->stats.rx_udp_csum_errs, 0,
++	    "Number frames received with UDP checksum errors");
++}
++
++static int
++cgem_probe(device_t dev)
++{
++
++	if (!ofw_bus_status_okay(dev))
++		return (ENXIO);
++
++	if (ofw_bus_search_compatible(dev, compat_data)->ocd_str == NULL)
++		return (ENXIO);
++
++	device_set_desc(dev, "Cadence CGEM Gigabit Ethernet Interface");
++	return (0);
++}
++
++static int
++cgem_attach(device_t dev)
++{
++	struct cgem_softc *sc = device_get_softc(dev);
++	if_t ifp = NULL;
++	int rid, err;
++	u_char eaddr[ETHER_ADDR_LEN];
++	int hwquirks;
++	phandle_t node;
++
++	sc->dev = dev;
++	CGEM_LOCK_INIT(sc);
++
++	/* Key off of compatible string and set hardware-specific options. */
++	hwquirks = ofw_bus_search_compatible(dev, compat_data)->ocd_data;
++	if ((hwquirks & HWQUIRK_NEEDNULLQS) != 0)
++		sc->neednullqs = 1;
++	if ((hwquirks & HWQUIRK_RXHANGWAR) != 0)
++		sc->rxhangwar = 1;
++	if ((hwquirks & HWQUIRK_VERSION2) != 0)
++		sc->version = 2;
++	else
++		sc->version = 1;
++	/*
++	 * Both pclk and hclk are mandatory but we don't have a proper
++	 * clock driver for Zynq so don't make it fatal if we can't
++	 * get them.
++	 */
++	if (clk_get_by_ofw_name(dev, 0, "pclk", &sc->clk_pclk) != 0)
++		device_printf(dev,
++		  "could not retrieve pclk.\n");
++	else {
++		if (clk_enable(sc->clk_pclk) != 0)
++			device_printf(dev, "could not enable pclk.\n");
++	}
++	if (clk_get_by_ofw_name(dev, 0, "hclk", &sc->clk_hclk) != 0)
++		device_printf(dev,
++		  "could not retrieve hclk.\n");
++	else {
++		if (clk_enable(sc->clk_hclk) != 0)
++			device_printf(dev, "could not enable hclk.\n");
++	}
++
++	/* Optional clocks */
++	if (clk_get_by_ofw_name(dev, 0, "tx_clk", &sc->clk_txclk) == 0) {
++		if (clk_enable(sc->clk_txclk) != 0) {
++			device_printf(dev, "could not enable tx_clk.\n");
++			err = ENXIO;
++			goto err_pclk;
++		}
++	}
++	if (clk_get_by_ofw_name(dev, 0, "rx_clk", &sc->clk_rxclk) == 0) {
++		if (clk_enable(sc->clk_rxclk) != 0) {
++			device_printf(dev, "could not enable rx_clk.\n");
++			err = ENXIO;
++			goto err_tx_clk;
++		}
++	}
++	if (clk_get_by_ofw_name(dev, 0, "tsu_clk", &sc->clk_tsuclk) == 0) {
++		if (clk_enable(sc->clk_tsuclk) != 0) {
++			device_printf(dev, "could not enable tsu_clk.\n");
++			err = ENXIO;
++			goto err_rx_clk;
++		}
++	}
++
++	node = ofw_bus_get_node(dev);
++	sc->phy_contype = mii_fdt_get_contype(node);
++
++	/* Get memory resource. */
++	rid = 0;
++	sc->mem_res = bus_alloc_resource_any(dev, SYS_RES_MEMORY, &rid,
++	    RF_ACTIVE);
++	if (sc->mem_res == NULL) {
++		device_printf(dev, "could not allocate memory resources.\n");
++		err = ENOMEM;
++		goto err_tsu_clk;
++	}
++
++	/* Get IRQ resource. */
++	rid = 0;
++	sc->irq_res = bus_alloc_resource_any(dev, SYS_RES_IRQ, &rid,
++	    RF_ACTIVE);
++	if (sc->irq_res == NULL) {
++		device_printf(dev, "could not allocate interrupt resource.\n");
++		cgem_detach(dev);
++		return (ENOMEM);
++	}
++
++	/* Set up ifnet structure. */
++	ifp = sc->ifp = if_alloc(IFT_ETHER);
++	if_setsoftc(ifp, sc);
++	if_initname(ifp, IF_CGEM_NAME, device_get_unit(dev));
++	if_setflags(ifp, IFF_BROADCAST | IFF_SIMPLEX | IFF_MULTICAST);
++	if_setinitfn(ifp, cgem_init);
++	if_setioctlfn(ifp, cgem_ioctl);
++	if_setstartfn(ifp, cgem_start);
++	if_setcapabilitiesbit(ifp, IFCAP_HWCSUM | IFCAP_HWCSUM_IPV6 |
++	    IFCAP_VLAN_MTU | IFCAP_VLAN_HWCSUM, 0);
++	if_setsendqlen(ifp, CGEM_NUM_TX_DESCS);
++	if_setsendqready(ifp);
++
++	/* Disable hardware checksumming by default. */
++	if_sethwassist(ifp, 0);
++	if_setcapenable(ifp, if_getcapabilities(ifp) &
++	    ~(IFCAP_HWCSUM | IFCAP_HWCSUM_IPV6 | IFCAP_VLAN_HWCSUM));
++
++	sc->if_old_flags = if_getflags(ifp);
++	sc->rxbufs = DEFAULT_NUM_RX_BUFS;
++
++	/* Reset hardware. */
++	CGEM_LOCK(sc);
++	cgem_reset(sc);
++	CGEM_UNLOCK(sc);
++
++	/* Attach phy to mii bus. */
++	err = mii_attach(dev, &sc->miibus, ifp,
++	    cgem_ifmedia_upd, cgem_ifmedia_sts, BMSR_DEFCAPMASK,
++	    MII_PHY_ANY, MII_OFFSET_ANY, 0);
++	if (err)
++		device_printf(dev, "warning: attaching PHYs failed\n");
++
++	/* Set up TX and RX descriptor area. */
++	err = cgem_setup_descs(sc);
++	if (err) {
++		device_printf(dev, "could not set up dma mem for descs.\n");
++		cgem_detach(dev);
++		goto err;
++	}
++
++	/* Get a MAC address. */
++	cgem_get_mac(sc, eaddr);
++
++	/* Start ticks. */
++	callout_init_mtx(&sc->tick_ch, &sc->sc_mtx, 0);
++
++	ether_ifattach(ifp, eaddr);
++
++	err = bus_setup_intr(dev, sc->irq_res, INTR_TYPE_NET | INTR_MPSAFE |
++	    INTR_EXCL, NULL, cgem_intr, sc, &sc->intrhand);
++	if (err) {
++		device_printf(dev, "could not set interrupt handler.\n");
++		ether_ifdetach(ifp);
++		cgem_detach(dev);
++		goto err;
++	}
++
++	cgem_add_sysctls(dev);
++
++	return (0);
++
++err_tsu_clk:
++	if (sc->clk_tsuclk)
++		clk_release(sc->clk_tsuclk);
++err_rx_clk:
++	if (sc->clk_rxclk)
++		clk_release(sc->clk_rxclk);
++err_tx_clk:
++	if (sc->clk_txclk)
++		clk_release(sc->clk_txclk);
++err_pclk:
++	if (sc->clk_pclk)
++		clk_release(sc->clk_pclk);
++	if (sc->clk_hclk)
++		clk_release(sc->clk_hclk);
++err:
++	return (err);
++}
++
++static int
++cgem_detach(device_t dev)
++{
++	struct cgem_softc *sc = device_get_softc(dev);
++#ifndef __rtems__
++	int i;
++#endif /* __rtems__ */
++
++	if (sc == NULL)
++		return (ENODEV);
++
++	if (device_is_attached(dev)) {
++		CGEM_LOCK(sc);
++		cgem_stop(sc);
++		CGEM_UNLOCK(sc);
++		callout_drain(&sc->tick_ch);
++		if_setflagbits(sc->ifp, 0, IFF_UP);
++		ether_ifdetach(sc->ifp);
++	}
++
++	if (sc->miibus != NULL) {
++		device_delete_child(dev, sc->miibus);
++		sc->miibus = NULL;
++	}
++
++	/* Release resources. */
++	if (sc->mem_res != NULL) {
++		bus_release_resource(dev, SYS_RES_MEMORY,
++		    rman_get_rid(sc->mem_res), sc->mem_res);
++		sc->mem_res = NULL;
++	}
++	if (sc->irq_res != NULL) {
++		if (sc->intrhand)
++			bus_teardown_intr(dev, sc->irq_res, sc->intrhand);
++		bus_release_resource(dev, SYS_RES_IRQ,
++		    rman_get_rid(sc->irq_res), sc->irq_res);
++		sc->irq_res = NULL;
++	}
++
++	/* Release DMA resources. */
++	if (sc->rxring != NULL) {
++		if (sc->rxring_physaddr != 0) {
++#ifndef __rtems__
++			bus_dmamap_unload(sc->desc_dma_tag,
++			    sc->rxring_dma_map);
++#endif /* __rtems__ */
++			sc->rxring_physaddr = 0;
++			sc->txring_physaddr = 0;
++			sc->null_qs_physaddr = 0;
++		}
++		bus_dmamem_free(sc->desc_dma_tag, sc->rxring,
++				sc->rxring_dma_map);
++		sc->rxring = NULL;
++		sc->txring = NULL;
++		sc->null_qs = NULL;
++
++#ifndef __rtems__
++		for (i = 0; i < CGEM_NUM_RX_DESCS; i++)
++			if (sc->rxring_m_dmamap[i] != NULL) {
++				bus_dmamap_destroy(sc->mbuf_dma_tag,
++				    sc->rxring_m_dmamap[i]);
++				sc->rxring_m_dmamap[i] = NULL;
++			}
++		for (i = 0; i < CGEM_NUM_TX_DESCS; i++)
++			if (sc->txring_m_dmamap[i] != NULL) {
++				bus_dmamap_destroy(sc->mbuf_dma_tag,
++				    sc->txring_m_dmamap[i]);
++				sc->txring_m_dmamap[i] = NULL;
++			}
++#endif /* __rtems__ */
++	}
++	if (sc->desc_dma_tag != NULL) {
++		bus_dma_tag_destroy(sc->desc_dma_tag);
++		sc->desc_dma_tag = NULL;
++	}
++	if (sc->mbuf_dma_tag != NULL) {
++		bus_dma_tag_destroy(sc->mbuf_dma_tag);
++		sc->mbuf_dma_tag = NULL;
++	}
++
++	bus_generic_detach(dev);
++
++	if (sc->clk_tsuclk)
++		clk_release(sc->clk_tsuclk);
++	if (sc->clk_rxclk)
++		clk_release(sc->clk_rxclk);
++	if (sc->clk_txclk)
++		clk_release(sc->clk_txclk);
++	if (sc->clk_pclk)
++		clk_release(sc->clk_pclk);
++	if (sc->clk_hclk)
++		clk_release(sc->clk_hclk);
++
++	CGEM_LOCK_DESTROY(sc);
++
++	return (0);
++}
++
++static device_method_t xmac_methods[] = {
++	/* Device interface */
++	DEVMETHOD(device_probe,		cgem_probe),
++	DEVMETHOD(device_attach,	cgem_attach),
++	DEVMETHOD(device_detach,	cgem_detach),
++
++	/* MII interface */
++	DEVMETHOD(miibus_readreg,	cgem_miibus_readreg),
++	DEVMETHOD(miibus_writereg,	cgem_miibus_writereg),
++	DEVMETHOD(miibus_statchg,	cgem_miibus_statchg),
++	DEVMETHOD(miibus_linkchg,	cgem_miibus_linkchg),
++
++	DEVMETHOD_END
++};
++
++static driver_t xmac_driver = {
++	"xmac",
++	xmac_methods,
++	sizeof(struct cgem_softc),
++};
++
++DRIVER_MODULE(xmac, simplebus, xmac_driver, NULL, NULL);
++DRIVER_MODULE(miibus, xmac, miibus_driver, NULL, NULL);
++MODULE_DEPEND(xmac, miibus, 1, 1, 1);
++MODULE_DEPEND(xmac, ether, 1, 1, 1);
++SIMPLEBUS_PNP_INFO(compat_data);
+diff --git a/sys/arm64/firefly/if_xmac_hw.h b/sys/arm64/firefly/if_xmac_hw.h
+new file mode 100644
+index 000000000..fc819bc9b
+--- /dev/null
++++ b/sys/arm64/firefly/if_xmac_hw.h
+@@ -0,0 +1,452 @@
++/*-
++ * SPDX-License-Identifier: BSD-2-Clause
++ *
++ * Copyright (c) 2012-2013 Thomas Skibo
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY AUTHOR AND CONTRIBUTORS ``AS IS'' AND
++ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED.  IN NO EVENT SHALL AUTHOR OR CONTRIBUTORS BE LIABLE
++ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
++ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
++ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ */
++
++/*
++ * Hardware and register defines for Cadence GEM Gigabit Ethernet
++ * controller such as the one used in Zynq-7000 SoC.
++ *
++ * Reference: Zynq-7000 All Programmable SoC Technical Reference Manual.
++ * (v1.4) November 16, 2012.  Xilinx doc UG585.  GEM is covered in Ch. 16
++ * and register definitions are in appendix B.18.
++ *
++ * Additional Reference: Zynq UltraScale+ Device Register Reference
++ * (UG1087 v1.7 Feb 8,2019):
++ * https://www.xilinx.com/html_docs/registers/ug1087/ug1087-zynq-ultrascale-registers.html
++ */
++
++#ifndef _IF_XMAC_HW_H_
++#define _IF_XMAC_HW_H_
++
++/* Cadence GEM hardware register definitions. */
++#define CGEM_NET_CTRL			0x000	/* Network Control */
++#define   CGEM_NET_CTRL_FLUSH_DPRAM_PKT		(1 << 18)
++#define   CGEM_NET_CTRL_TX_PFC_PRI_PAUSE_FRAME	(1 << 17)
++#define   CGEM_NET_CTRL_EN_PFC_PRI_PAUSE_RX	(1 << 16)
++#define   CGEM_NET_CTRL_STORE_RX_TSTAMP		(1 << 15)
++#define   CGEM_NET_CTRL_TX_ZEROQ_PAUSE_FRAME	(1 << 12)
++#define   CGEM_NET_CTRL_TX_PAUSE_FRAME		(1 << 11)
++#define   CGEM_NET_CTRL_TX_HALT			(1 << 10)
++#define   CGEM_NET_CTRL_START_TX		(1 << 9)
++#define   CGEM_NET_CTRL_BACK_PRESSURE		(1 << 8)
++#define   CGEM_NET_CTRL_WREN_STAT_REGS		(1 << 7)
++#define   CGEM_NET_CTRL_INCR_STAT_REGS		(1 << 6)
++#define   CGEM_NET_CTRL_CLR_STAT_REGS		(1 << 5)
++#define   CGEM_NET_CTRL_MGMT_PORT_EN		(1 << 4)
++#define   CGEM_NET_CTRL_TX_EN			(1 << 3)
++#define   CGEM_NET_CTRL_RX_EN			(1 << 2)
++#define   CGEM_NET_CTRL_LOOP_LOCAL		(1 << 1)
++
++#define CGEM_NET_CFG			0x004	/* Network Configuration */
++#define   CGEM_NET_CFG_UNIDIR_EN		(1U << 31)
++#define   CGEM_NET_CFG_IGNORE_IPG_RX_ER		(1 << 30)
++#define   CGEM_NET_CFG_RX_BAD_PREAMBLE		(1 << 29)
++#define   CGEM_NET_CFG_IPG_STRETCH_EN		(1 << 28)
++#define   CGEM_NET_CFG_SGMII_EN			(1 << 27)
++#define   CGEM_NET_CFG_IGNORE_RX_FCS		(1 << 26)
++#define   CGEM_NET_CFG_RX_HD_WHILE_TX		(1 << 25)
++#define   CGEM_NET_CFG_RX_CHKSUM_OFFLD_EN	(1 << 24)
++#define   CGEM_NET_CFG_DIS_CP_PAUSE_FRAME	(1 << 23)
++#define   CGEM_NET_CFG_DBUS_WIDTH_32		(0 << 21)
++#define   CGEM_NET_CFG_DBUS_WIDTH_64		(1 << 21)
++#define   CGEM_NET_CFG_DBUS_WIDTH_128		(2 << 21)
++#define   CGEM_NET_CFG_DBUS_WIDTH_MASK		(3 << 21)
++#define   CGEM_NET_CFG_MDC_CLK_DIV_8		(0 << 18)
++#define   CGEM_NET_CFG_MDC_CLK_DIV_16		(1 << 18)
++#define   CGEM_NET_CFG_MDC_CLK_DIV_32		(2 << 18)
++#define   CGEM_NET_CFG_MDC_CLK_DIV_48		(3 << 18)
++#define   CGEM_NET_CFG_MDC_CLK_DIV_64		(4 << 18)
++#define   CGEM_NET_CFG_MDC_CLK_DIV_96		(5 << 18)
++#define   CGEM_NET_CFG_MDC_CLK_DIV_128		(6 << 18)
++#define   CGEM_NET_CFG_MDC_CLK_DIV_224		(7 << 18)
++#define   CGEM_NET_CFG_MDC_CLK_DIV_MASK		(7 << 18)
++#define   CGEM_NET_CFG_FCS_REMOVE		(1 << 17)
++#define   CGEM_NET_CFG_LEN_ERR_FRAME_DISC	(1 << 16)
++#define   CGEM_NET_CFG_RX_BUF_OFFSET_SHFT	14
++#define   CGEM_NET_CFG_RX_BUF_OFFSET_MASK	(3 << 14)
++#define   CGEM_NET_CFG_RX_BUF_OFFSET(n)		((n) << 14)
++#define   CGEM_NET_CFG_PAUSE_EN			(1 << 13)
++#define   CGEM_NET_CFG_RETRY_TEST		(1 << 12)
++#define   CGEM_NET_CFG_PCS_SEL			(1 << 11)
++#define   CGEM_NET_CFG_GIGE_EN			(1 << 10)
++#define   CGEM_NET_CFG_EXT_ADDR_MATCH_EN	(1 << 9)
++#define   CGEM_NET_CFG_1536RXEN			(1 << 8)
++#define   CGEM_NET_CFG_UNI_HASH_EN		(1 << 7)
++#define   CGEM_NET_CFG_MULTI_HASH_EN		(1 << 6)
++#define   CGEM_NET_CFG_NO_BCAST			(1 << 5)
++#define   CGEM_NET_CFG_COPY_ALL			(1 << 4)
++#define   CGEM_NET_CFG_DISC_NON_VLAN		(1 << 2)
++#define   CGEM_NET_CFG_FULL_DUPLEX		(1 << 1)
++#define   CGEM_NET_CFG_SPEED100			(1 << 0)
++
++#define CGEM_NET_STAT			0x008	/* Network Status */
++#define   CGEM_NET_STAT_PFC_PRI_PAUSE_NEG	(1 << 6)
++#define   CGEM_NET_STAT_PCS_AUTONEG_PAUSE_TX_RES (1 << 5)
++#define   CGEM_NET_STAT_PCS_AUTONEG_PAUSE_RX_RES (1 << 4)
++#define   CGEM_NET_STAT_PCS_AUTONEG_DUP_RES	(1 << 3)
++#define   CGEM_NET_STAT_PHY_MGMT_IDLE		(1 << 2)
++#define   CGEM_NET_STAT_MDIO_IN_PIN_STATUS	(1 << 1)
++#define   CGEM_NET_STAT_PCS_LINK_STATE		(1 << 0)
++
++#define CGEM_USER_IO			0x00C	/* User I/O */
++
++#define CGEM_DMA_CFG			0x010	/* DMA Config */
++#define   CGEM_DMA_CFG_ADDR_BUS_64		(1 << 30)
++#define   CGEM_DMA_CFG_DISC_WHEN_NO_AHB		(1 << 24)
++#define   CGEM_DMA_CFG_RX_BUF_SIZE_SHIFT	16
++#define   CGEM_DMA_CFG_RX_BUF_SIZE_MASK		(0xff << 16)
++#define   CGEM_DMA_CFG_RX_BUF_SIZE(sz)		((((sz) + 63) / 64)  <<  16)
++#define   CGEM_DMA_CFG_CHKSUM_GEN_OFFLOAD_EN	(1 << 11)
++#define   CGEM_DMA_CFG_TX_PKTBUF_MEMSZ_SEL	(1 << 10)
++#define   CGEM_DMA_CFG_RX_PKTBUF_MEMSZ_SEL_1K	(0 << 8)
++#define   CGEM_DMA_CFG_RX_PKTBUF_MEMSZ_SEL_2K	(1 << 8)
++#define   CGEM_DMA_CFG_RX_PKTBUF_MEMSZ_SEL_4K	(2 << 8)
++#define   CGEM_DMA_CFG_RX_PKTBUF_MEMSZ_SEL_8K	(3 << 8)
++#define   CGEM_DMA_CFG_RX_PKTBUF_MEMSZ_SEL_MASK	(3 << 8)
++#define   CGEM_DMA_CFG_AHB_ENDIAN_SWAP_PKT_EN	(1 << 7)
++#define   CGEM_DMA_CFG_AHB_ENDIAN_SWAP_MGMT_EN	(1 << 6)
++#define   CGEM_DMA_CFG_AHB_FIXED_BURST_LEN_1	(1 << 0)
++#define   CGEM_DMA_CFG_AHB_FIXED_BURST_LEN_4	(4 << 0)
++#define   CGEM_DMA_CFG_AHB_FIXED_BURST_LEN_8	(8 << 0)
++#define   CGEM_DMA_CFG_AHB_FIXED_BURST_LEN_16	(16 << 0)
++#define   CGEM_DMA_CFG_AHB_FIXED_BURST_LEN_MASK	(0x1f << 0)
++
++#define CGEM_TX_STAT			0x014	/* Transmit Status */
++#define   CGEM_TX_STAT_HRESP_NOT_OK		(1 << 8)
++#define   CGEM_TX_STAT_LATE_COLL		(1 << 7)
++#define   CGEM_TX_STAT_UNDERRUN			(1 << 6)
++#define   CGEM_TX_STAT_COMPLETE			(1 << 5)
++#define   CGEM_TX_STAT_CORRUPT_AHB_ERR		(1 << 4)
++#define   CGEM_TX_STAT_GO			(1 << 3)
++#define   CGEM_TX_STAT_RETRY_LIMIT_EXC		(1 << 2)
++#define   CGEM_TX_STAT_COLLISION		(1 << 1)
++#define   CGEM_TX_STAT_USED_BIT_READ		(1 << 0)
++#define   CGEM_TX_STAT_ALL			0x1ff
++
++#define CGEM_RX_QBAR			0x018	/* Receive Buf Q Base Addr */
++#define CGEM_TX_QBAR			0x01C	/* Transmit Buf Q Base Addr */
++
++#define CGEM_RX_STAT			0x020	/* Receive Status */
++#define   CGEM_RX_STAT_HRESP_NOT_OK		(1 << 3)
++#define   CGEM_RX_STAT_OVERRUN			(1 << 2)
++#define   CGEM_RX_STAT_FRAME_RECD		(1 << 1)
++#define   CGEM_RX_STAT_BUF_NOT_AVAIL		(1 << 0)
++#define   CGEM_RX_STAT_ALL			0xf
++
++#define CGEM_INTR_STAT			0x024	/* Interrupt Status */
++#define CGEM_INTR_EN			0x028	/* Interrupt Enable */
++#define CGEM_INTR_DIS			0x02C	/* Interrupt Disable */
++#define CGEM_INTR_MASK			0x030	/* Interrupt Mask */
++#define   CGEM_INTR_TSU_SEC_INCR		(1 << 26)
++#define   CGEM_INTR_PDELAY_RESP_TX		(1 << 25)
++#define   CGEM_INTR_PDELAY_REQ_TX		(1 << 24)
++#define   CGEM_INTR_PDELAY_RESP_RX		(1 << 23)
++#define   CGEM_INTR_PDELAY_REQ_RX		(1 << 22)
++#define   CGEM_INTR_SYNX_TX			(1 << 21)
++#define   CGEM_INTR_DELAY_REQ_TX		(1 << 20)
++#define   CGEM_INTR_SYNC_RX			(1 << 19)
++#define   CGEM_INTR_DELAY_REQ_RX		(1 << 18)
++#define   CGEM_INTR_PARTNER_PG_RX		(1 << 17)
++#define   CGEM_INTR_AUTONEG_COMPL		(1 << 16)
++#define   CGEM_INTR_EXT_INTR			(1 << 15)
++#define   CGEM_INTR_PAUSE_TX			(1 << 14)
++#define   CGEM_INTR_PAUSE_ZERO			(1 << 13)
++#define   CGEM_INTR_PAUSE_NONZEROQ_RX		(1 << 12)
++#define   CGEM_INTR_HRESP_NOT_OK		(1 << 11)
++#define   CGEM_INTR_RX_OVERRUN			(1 << 10)
++#define   CGEM_INTR_LINK_CHNG			(1 << 9)
++#define   CGEM_INTR_TX_COMPLETE			(1 << 7)
++#define   CGEM_INTR_TX_CORRUPT_AHB_ERR		(1 << 6)
++#define   CGEM_INTR_RETRY_EX_LATE_COLLISION	(1 << 5)
++#define   CGEM_INTR_TX_URUN				(1 << 4)
++#define   CGEM_INTR_TX_USED_READ		(1 << 3)
++#define   CGEM_INTR_RX_USED_READ		(1 << 2)
++#define   CGEM_INTR_RX_COMPLETE			(1 << 1)
++#define   CGEM_INTR_MGMT_SENT			(1 << 0)
++#define   CGEM_INTR_ALL				0x7FFFEFF
++
++#define CGEM_PHY_MAINT			0x034	/* PHY Maintenenace */
++#define   CGEM_PHY_MAINT_CLAUSE_22		(1 << 30)
++#define   CGEM_PHY_MAINT_OP_SHIFT		28
++#define   CGEM_PHY_MAINT_OP_MASK		(3 << 28)
++#define   CGEM_PHY_MAINT_OP_READ		(2 << 28)
++#define   CGEM_PHY_MAINT_OP_WRITE		(1 << 28)
++#define   CGEM_PHY_MAINT_PHY_ADDR_SHIFT		23
++#define   CGEM_PHY_MAINT_PHY_ADDR_MASK		(0x1f << 23)
++#define   CGEM_PHY_MAINT_REG_ADDR_SHIFT		18
++#define   CGEM_PHY_MAINT_REG_ADDR_MASK		(0x1f << 18)
++#define   CGEM_PHY_MAINT_MUST_10		(2 << 16)
++#define   CGEM_PHY_MAINT_DATA_MASK		0xffff
++
++#define CGEM_RX_PAUSEQ			0x038	/* Received Pause Quantum */
++#define CGEM_TX_PAUSEQ			0x03C	/* Transmit Puase Quantum */
++
++#define CGEM_HSMAC				 0x050
++#define CGEM_HSMACSPEED_MASK	 0x7
++
++
++#define CGEM_HASH_BOT			0x080	/* Hash Reg Bottom [31:0] */
++#define CGEM_HASH_TOP			0x084	/* Hash Reg Top [63:32] */
++#define CGEM_SPEC_ADDR_LOW(n)		(0x088 + (n) * 8)
++#define CGEM_SPEC_ADDR_HI(n)		(0x08C + (n) * 8)
++
++#define CGEM_TYPE_ID_MATCH1		0x0A8	/* Type ID Match 1 */
++#define   CGEM_TYPE_ID_MATCH_COPY_EN		(1U << 31)
++#define CGEM_TYPE_ID_MATCH2		0x0AC	/* Type ID Match 2 */
++#define CGEM_TYPE_ID_MATCH3		0x0B0	/* Type ID Match 3 */
++#define CGEM_TYPE_ID_MATCH4		0x0B4	/* Type ID Match 4 */
++
++#define CGEM_WAKE_ON_LAN		0x0B8	/* Wake on LAN Register */
++#define   CGEM_WOL_MULTI_HASH_EN		(1 << 19)
++#define   CGEM_WOL_SPEC_ADDR1_EN		(1 << 18)
++#define   CGEM_WOL_ARP_REQ_EN			(1 << 17)
++#define   CGEM_WOL_MAGIC_PKT_EN			(1 << 16)
++#define   CGEM_WOL_ARP_REQ_IP_ADDR_MASK		0xffff
++
++#define CGEM_IPG_STRETCH		/* IPG Stretch Register */
++
++#define CGEM_STACKED_VLAN		0x0C0	/* Stacked VLAN Register */
++#define   CGEM_STACKED_VLAN_EN			(1U << 31)
++
++#define CGEM_TX_PFC_PAUSE		0x0C4	/* Transmit PFC Pause Reg */
++#define   CGEM_TX_PFC_PAUSEQ_SEL_SHIFT		8
++#define   CGEM_TX_PFC_PAUSEQ_SEL_MASK		(0xff << 8)
++#define   CGEM_TX_PFC_PAUSE_PRI_EN_VEC_VAL_MASK 0xff
++
++#define CGEM_SPEC_ADDR1_MASK_BOT	0x0C8	/* Specific Addr Mask1 [31:0]*/
++#define CGEM_SPEC_ADDR1_MASK_TOP	0x0CC	/* Specific Addr Mask1[47:32]*/
++#define CGEM_MODULE_ID			0x0FC	/* Module ID */
++#define CGEM_OCTETS_TX_BOT		0x100	/* Octets xmitted [31:0] */
++#define CGEM_OCTETS_TX_TOP		0x104	/* Octets xmitted [47:32] */
++#define CGEM_FRAMES_TX			0x108	/* Frames xmitted */
++#define CGEM_BCAST_FRAMES_TX		0x10C	/* Broadcast Frames xmitted */
++#define CGEM_MULTI_FRAMES_TX		0x110	/* Multicast Frames xmitted */
++#define CGEM_PAUSE_FRAMES_TX		0x114	/* Pause Frames xmitted */
++#define CGEM_FRAMES_64B_TX		0x118	/* 64-Byte Frames xmitted */
++#define CGEM_FRAMES_65_127B_TX		0x11C	/* 65-127 Byte Frames xmitted*/
++#define CGEM_FRAMES_128_255B_TX		0x120	/* 128-255 Byte Frames xmit */
++#define CGEM_FRAMES_256_511B_TX		0x124	/* 256-511 Byte Frames xmit */
++#define CGEM_FRAMES_512_1023B_TX	0x128	/* 512-1023 Byte frames xmit */
++#define CGEM_FRAMES_1024_1518B_TX	0x12C	/* 1024-1518 Byte frames xmit*/
++#define CGEM_TX_UNDERRUNS		0x134	/* Transmit Under-runs */
++#define CGEM_SINGLE_COLL_FRAMES		0x138	/* Single-Collision Frames */
++#define CGEM_MULTI_COLL_FRAMES		0x13C	/* Multi-Collision Frames */
++#define CGEM_EXCESSIVE_COLL_FRAMES	0x140	/* Excessive Collision Frames*/
++#define CGEM_LATE_COLL			0x144	/* Late Collisions */
++#define CGEM_DEFERRED_TX_FRAMES		0x148	/* Deferred Transmit Frames */
++#define CGEM_CARRIER_SENSE_ERRS		0x14C	/* Carrier Sense Errors */
++#define CGEM_OCTETS_RX_BOT		0x150	/* Octets Received [31:0] */
++#define CGEM_OCTETS_RX_TOP		0x154	/* Octets Received [47:32] */
++#define CGEM_FRAMES_RX			0x158	/* Frames Received */
++#define CGEM_BCAST_FRAMES_RX		0x15C	/* Broadcast Frames Received */
++#define CGEM_MULTI_FRAMES_RX		0x160	/* Multicast Frames Received */
++#define CGEM_PAUSE_FRAMES_RX		0x164	/* Pause Frames Reeived */
++#define CGEM_FRAMES_64B_RX		0x168	/* 64-Byte Frames Received */
++#define CGEM_FRAMES_65_127B_RX		0x16C	/* 65-127 Byte Frames Rx'd */
++#define CGEM_FRAMES_128_255B_RX		0x170	/* 128-255 Byte Frames Rx'd */
++#define CGEM_FRAMES_256_511B_RX		0x174	/* 256-511 Byte Frames Rx'd */
++#define CGEM_FRAMES_512_1023B_RX	0x178	/* 512-1023 Byte Frames Rx'd */
++#define CGEM_FRAMES_1024_1518B_RX	0x17C	/* 1024-1518 Byte Frames Rx'd*/
++#define CGEM_UNDERSZ_RX			0x184	/* Undersize Frames Rx'd */
++#define CGEM_OVERSZ_RX			0x188	/* Oversize Frames Rx'd */
++#define CGEM_JABBERS_RX			0x18C	/* Jabbers received */
++#define CGEM_FCS_ERRS			0x190	/* Frame Check Sequence Errs */
++#define CGEM_LENGTH_FIELD_ERRS		0x194	/* Length Firled Frame Errs */
++#define CGEM_RX_SYMBOL_ERRS		0x198	/* Receive Symbol Errs */
++#define CGEM_ALIGN_ERRS			0x19C	/* Alignment Errors */
++#define CGEM_RX_RESOURCE_ERRS		0x1A0	/* Receive Resoure Errors */
++#define CGEM_RX_OVERRUN_ERRS		0x1A4	/* Receive Overrun Errors */
++#define CGEM_IP_HDR_CKSUM_ERRS		0x1A8	/* IP Hdr Checksum Errors */
++#define CGEM_TCP_CKSUM_ERRS		0x1AC	/* TCP Checksum Errors */
++#define CGEM_UDP_CKSUM_ERRS		0x1B0	/* UDP Checksum Errors */
++#define CGEM_TIMER_STROBE_S		0x1C8	/* 1588 timer sync strobe s */
++#define CGEM_TIMER_STROBE_NS		0x1CC	/* timer sync strobe ns */
++#define CGEM_TIMER_S			0x1D0	/* 1588 timer seconds */
++#define CGEM_TIMER_NS			0x1D4	/* 1588 timer ns */
++#define CGEM_ADJUST			0x1D8	/* 1588 timer adjust */
++#define CGEM_INCR			0x1DC	/* 1588 timer increment */
++#define CGEM_PTP_TX_S			0x1E0	/* PTP Event Frame xmit secs */
++#define CGEM_PTP_TX_NS			0x1E4	/* PTP Event Frame xmit ns */
++#define CGEM_PTP_RX_S			0x1E8	/* PTP Event Frame rcv'd s */
++#define CGEM_PTP_RX_NS			0x1EC	/* PTP Event Frame rcv'd ns */
++#define CGEM_PTP_PEER_TX_S		0x1F0	/* PTP Peer Event xmit s */
++#define CGEM_PTP_PEER_TX_NS		0x1F4	/* PTP Peer Event xmit ns */
++#define CGEM_PTP_PEER_RX_S		0x1F8	/* PTP Peer Event rcv'd s */
++#define CGEM_PTP_PEER_RX_NS		0x1FC	/* PTP Peer Event rcv'd ns */
++
++#define CGEM_DESIGN_CFG1		0x280	/* Design Configuration 1 */
++#define   CGEM_DESIGN_CFG1_AXI_CACHE_WIDTH_MASK	(0xfU << 28)
++#define   CGEM_DESIGN_CFG1_DMA_BUS_WIDTH_MASK	(7 << 25)
++#define   CGEM_DESIGN_CFG1_DMA_BUS_WIDTH_32	(1 << 25)
++#define   CGEM_DESIGN_CFG1_DMA_BUS_WIDTH_64	(2 << 25)
++#define   CGEM_DESIGN_CFG1_DMA_BUS_WIDTH_128	(4 << 25)
++#define   CGEM_DESIGN_CFG1_IRQ_READ_CLR		(1 << 23)
++#define   CGEM_DESIGN_CFG1_NO_SNAPSHOT		(1 << 22)
++#define   CGEM_DESIGN_CFG1_NO_STATS		(1 << 21)
++#define   CGEM_DESIGN_CFG1_NO_SCAN_PINS		(1 << 20)
++#define   CGEM_DESIGN_CFG1_USER_IN_WIDTH_MASK	(0x1f << 15)
++#define   CGEM_DESIGN_CFG1_USER_OUT_WIDTH_MASK	(0x1f << 10)
++#define   CGEM_DESIGN_CFG1_USER_IO		(1 << 9)
++#define   CGEM_DESIGN_CFG1_APB_REV2		(1 << 8)
++#define   CGEM_DESIGN_CFG1_APB_REV1		(1 << 7)
++#define   CGEM_DESIGN_CFG1_EXT_FIFO_INTERFACE	(1 << 6)
++#define   CGEM_DESIGN_CFG1_NO_INT_LOOPBACK	(1 << 5)
++#define   CGEM_DESIGN_CFG1_INT_LOOPBACK		(1 << 4)
++#define   CGEM_DESIGN_CFG1_TDC_50		(1 << 3)
++#define   CGEM_DESIGN_CFG1_RDC_50		(1 << 2)
++#define   CGEM_DESIGN_CFG1_SERDES		(1 << 1)
++#define   CGEM_DESIGN_CFG1_NO_PCS		(1 << 0)
++
++#define CGEM_DESIGN_CFG2		0x284	/* Design Configuration 2 */
++#define   CGEM_DESIGN_CFG2_TX_PBUF_ADDR_SHIFT	26
++#define   CGEM_DESIGN_CFG2_TX_PBUF_ADDR_MASK	(0xf << 26)
++#define   CGEM_DESIGN_CFG2_RX_PBUF_ADDR_SHIFT	22
++#define   CGEM_DESIGN_CFG2_RX_PBUF_ADDR_MASK	(0xf << 22)
++#define   CGEM_DESIGN_CFG2_TX_PKT_BUF		(1 << 21)
++#define   CGEM_DESIGN_CFG2_RX_PKT_BUF		(1 << 20)
++#define   CGEM_DESIGN_CFG2_HPROT_VAL_SHIFT	16
++#define   CGEM_DESIGN_CFG2_HPROT_VAL_MASK	(0xf << 16)
++#define   CGEM_DESIGN_CFG2_JUMBO_MAX_LEN_MASK	0xffff
++
++#define CGEM_DESIGN_CFG3		0x288	/* Design Configuration 3 */
++#define   CGEM_DESIGN_CFG3_RX_BASE2_FIFO_SZ_MASK (0xffffU << 16)
++#define   CGEM_DESIGN_CFG3_RX_BASE2_FIFO_SZ_SHIFT 16
++#define   CGEM_DESIGN_CFG3_RX_FIFO_SIZE_MASK	0xffff
++
++#define CGEM_DESIGN_CFG4		0x28C	/* Design Configuration 4 */
++#define   CGEM_DESIGN_CFG4_TX_BASE2_FIFO_SZ_SHIFT 16
++#define   CGEM_DESIGN_CFG4_TX_BASE2_FIFO_SZ_MASK (0xffffU << 16)
++#define   CGEM_DESIGN_CFG4_TX_FIFO_SIZE_MASK	0xffff
++
++#define CGEM_DESIGN_CFG5		0x290	/* Design Configuration 5 */
++#define   CGEM_DESIGN_CFG5_TSU_CLK		(1 << 28)
++#define   CGEM_DESIGN_CFG5_RX_BUF_LEN_DEF_SHIFT 20
++#define   CGEM_DESIGN_CFG5_RX_BUF_LEN_DEF_MASK	(0xff << 20)
++#define   CGEM_DESIGN_CFG5_TX_PBUF_SIZE_DEF	(1 << 19)
++#define   CGEM_DESIGN_CFG5_RX_PBUF_SIZE_DEF_SHIFT 17
++#define   CGEM_DESIGN_CFG5_RX_PBUF_SIZE_DEF_MASK (3 << 17)
++#define   CGEM_DESIGN_CFG5_ENDIAN_SWAP_DEF_SHIFT 15
++#define   CGEM_DESIGN_CFG5_ENDIAN_SWAP_DEF_MASK (3 << 15)
++#define   CGEM_DESIGN_CFG5_MDC_CLOCK_DIV_SHIFT	12
++#define   CGEM_DESIGN_CFG5_MDC_CLOCK_DIV_MASK	(7 << 12)
++#define   CGEM_DESIGN_CFG5_DMA_BUS_WIDTH_SHIFT	10
++#define   CGEM_DESIGN_CFG5_DMA_BUS_WIDTH_MASK	(3 << 10)
++#define   CGEM_DESIGN_CFG5_PHY_IDENT		(1 << 9)
++#define   CGEM_DESIGN_CFG5_TSU			(1 << 8)
++#define   CGEM_DESIGN_CFG5_TX_FIFO_CNT_WIDTH_SHIFT 4
++#define   CGEM_DESIGN_CFG5_TX_FIFO_CNT_WIDTH_MASK (0xf << 4)
++#define   CGEM_DESIGN_CFG5_RX_FIFO_CNT_WIDTH_MASK 0xf
++
++#define CGEM_DESIGN_CFG6		0x294	/* Design Configuration 6 */
++#define   CGEM_DESIGN_CFG6_ADDR_64B		(1 << 23) /* 64-bit addr cap */
++#define   CGEM_DESIGN_CFG6_DMA_PRIO_Q_MASK	0xfffe
++#define   CGEM_DESIGN_CFG6_DMA_PRIO_Q(n)	(1 << (n))
++
++#define CGEM_TX_QN_BAR(n)		(0x440 + ((n) - 1) * 4)
++#define CGEM_RX_QN_BAR(n)		(0x480 + ((n) - 1) * 4)
++
++#define CGEM_TX_QBAR_HI			0x4C8
++#define CGEM_RX_QBAR_HI			0x4D4
++
++#define CGEM_TAIL(hw_q)		   (0x0E80 + ((hw_q) << 2))
++#define CGEM_TAIL_ENABLE		0x0E7C /* Enable tail */
++
++/*
++ * Transmit Descriptors:  two or four 32-bit words:
++ *	word0: address
++ *	word1: length and control
++ *	word2: address upper 32-bits (64-bit mode)
++ *	word3: unused (64-bit mode)
++ */
++
++struct cgem_tx_desc {
++	uint32_t	addr;
++	uint32_t	ctl;
++#define CGEM_TXDESC_USED			(1U << 31) /* done txmitting */
++#define CGEM_TXDESC_WRAP			(1 << 30)  /* end descr ring */
++#define CGEM_TXDESC_RETRY_ERR			(1 << 29)
++#define CGEM_TXDESC_AHB_ERR			(1 << 27)
++#define CGEM_TXDESC_LATE_COLL			(1 << 26)
++#define CGEM_TXDESC_CKSUM_GEN_STAT_MASK		(7 << 20)
++#define CGEM_TXDESC_CKSUM_GEN_STAT_VLAN_HDR_ERR (1 << 20)
++#define CGEM_TXDESC_CKSUM_GEN_STAT_SNAP_HDR_ERR (2 << 20)
++#define CGEM_TXDESC_CKSUM_GEN_STAT_IP_HDR_ERR	(3 << 20)
++#define CGEM_TXDESC_CKSUM_GEN_STAT_UNKNOWN_TYPE (4 << 20)
++#define CGEM_TXDESC_CKSUM_GEN_STAT_UNSUPP_FRAG	(5 << 20)
++#define CGEM_TXDESC_CKSUM_GEN_STAT_NOT_TCPUDP	(6 << 20)
++#define CGEM_TXDESC_CKSUM_GEN_STAT_SHORT_PKT	(7 << 20)
++#define CGEM_TXDESC_NO_CRC_APPENDED		(1 << 16)
++#define CGEM_TXDESC_LAST_BUF			(1 << 15)  /* last in frame */
++#define CGEM_TXDESC_LENGTH_MASK		0x3fff
++#ifdef CGEM64
++	uint32_t	addrhi;
++	uint32_t	unused;
++#endif
++};
++
++/*
++ * Receive Descriptors: two or four 32-bit words:
++ *	word0: address | WRAP and OWN flags
++ *	word1: length and control
++ *	word2: address upper 32 bits (64-bit mode)
++ *	word3: unused
++ */
++
++struct cgem_rx_desc {
++	uint32_t	addr;
++#define CGEM_RXDESC_WRAP			(1 << 1)  /* goes in addr! */
++#define CGEM_RXDESC_OWN				(1 << 0)  /* buf filled */
++	uint32_t	ctl;
++#define CGEM_RXDESC_BCAST			(1U << 31)/* all 1's bcast */
++#define CGEM_RXDESC_MULTI_MATCH			(1 << 30) /* mutlicast match */
++#define CGEM_RXDESC_UNICAST_MATCH		(1 << 29)
++#define CGEM_RXDESC_EXTERNAL_MATCH		(1 << 28) /* ext addr match */
++#define CGEM_RXDESC_SPEC_MATCH_SHIFT		25
++#define CGEM_RXDESC_SPEC_MATCH_MASK		(3 << 25)
++#define CGEM_RXDESC_TYPE_ID_MATCH_SHIFT		22
++#define CGEM_RXDESC_TYPE_ID_MATCH_MASK		(3 << 22)
++#define CGEM_RXDESC_CKSUM_STAT_MASK		(3 << 22) /* same as above */
++#define CGEM_RXDESC_CKSUM_STAT_NONE		(0 << 22)
++#define CGEM_RXDESC_CKSUM_STAT_IP_GOOD		(1 << 22)
++#define CGEM_RXDESC_CKSUM_STAT_TCP_GOOD		(2 << 22) /* and ip good */
++#define CGEM_RXDESC_CKSUM_STAT_UDP_GOOD		(3 << 22) /* and ip good */
++#define CGEM_RXDESC_VLAN_DETECTED		(1 << 21)
++#define CGEM_RXDESC_PRIO_DETECTED		(1 << 20)
++#define CGEM_RXDESC_VLAN_PRIO_SHIFT		17
++#define CGEM_RXDESC_VLAN_PRIO_MASK		(7 << 17)
++#define CGEM_RXDESC_CFI				(1 << 16)
++#define CGEM_RXDESC_EOF				(1 << 15) /* end of frame */
++#define CGEM_RXDESC_SOF				(1 << 14) /* start of frame */
++#define CGEM_RXDESC_BAD_FCS			(1 << 13)
++#define CGEM_RXDESC_LENGTH_MASK			0x1fff
++#ifdef CGEM64
++	uint32_t	addrhi;
++	uint32_t	unused;
++#endif
++};
++
++#endif /* _IF_XMAC_HW_H_ */
+diff --git a/sys/arm64/include/cpu.h b/sys/arm64/include/cpu.h
+index 0701a75d1..bfbc97c6e 100644
+--- a/sys/arm64/include/cpu.h
++++ b/sys/arm64/include/cpu.h
+@@ -86,6 +86,7 @@
+ #define	CPU_IMPL_APPLE		0x61
+ #define	CPU_IMPL_INTEL		0x69
+ #define	CPU_IMPL_AMPERE		0xC0
++#define CPU_IMPL_FIREFLY    0x70
+ 
+ /* ARM Part numbers */
+ #define	CPU_PART_FOUNDATION	0xD00
+@@ -150,6 +151,15 @@
+ #define CPU_PART_M2_BLIZZARD_MAX  0x038
+ #define CPU_PART_M2_AVALANCHE_MAX 0x039
+ 
++/* Firefly */
++#define CPU_PART_FIREFLY_F310  0x303
++#define CPU_PART_FIREFLY_F660  0x660
++#define CPU_PART_FIREFLY_F661  0x661
++#define CPU_PART_FIREFLY_F662  0x662
++#define CPU_PART_FIREFLY_F663  0x663
++#define CPU_PART_FIREFLY_F664  0x664
++#define CPU_PART_FIREFLY_F862  0x862
++
+ #define	CPU_IMPL(midr)	(((midr) >> 24) & 0xff)
+ #define	CPU_PART(midr)	(((midr) >> 4) & 0xfff)
+ #define	CPU_VAR(midr)	(((midr) >> 20) & 0xf)
+diff --git a/sys/arm64/include/kdb.h b/sys/arm64/include/kdb.h
+index e68c81824..6545f7353 100644
+--- a/sys/arm64/include/kdb.h
++++ b/sys/arm64/include/kdb.h
+@@ -39,6 +39,8 @@ void kdb_cpu_clear_singlestep(void);
+ void kdb_cpu_set_singlestep(void);
+ int kdb_cpu_set_watchpoint(vm_offset_t addr, size_t size, int access);
+ int kdb_cpu_clr_watchpoint(vm_offset_t addr, size_t size);
++int kdb_cpu_set_hwbreakpoint(vm_offset_t addr, vm_size_t size);
++int kdb_cpu_clr_hwbreakpoint(vm_offset_t addr, vm_size_t size);
+ 
+ static __inline void
+ kdb_cpu_sync_icache(unsigned char *addr, size_t size)
+diff --git a/sys/conf/files.arm64 b/sys/conf/files.arm64
+index cf2e1d22d..3817f63df 100644
+--- a/sys/conf/files.arm64
++++ b/sys/conf/files.arm64
+@@ -683,6 +683,8 @@ arm64/rockchip/rk_tsadc.c			optional fdt soc_rockchip_rk3399 | fdt soc_rockchip_
+ arm64/rockchip/rk_pwm.c				optional fdt rk_pwm
+ arm64/rockchip/rk_pcie.c			optional fdt pci soc_rockchip_rk3399
+ arm64/rockchip/rk_pcie_phy.c			optional fdt pci soc_rockchip_rk3399
++arm64/firefly/if_gmac.c			optional fdt soc_firefly_v1
++arm64/firefly/if_xmac.c			optional fdt soc_firefly_v2 | soc_firefly_v3
+ 
+ # RockChip Clock support
+ arm64/rockchip/clk/rk_cru.c			optional fdt soc_rockchip_rk3328 | fdt soc_rockchip_rk3399 | fdt soc_rockchip_rk3568
+diff --git a/sys/conf/options.arm64 b/sys/conf/options.arm64
+index c53723ae2..41b2972f1 100644
+--- a/sys/conf/options.arm64
++++ b/sys/conf/options.arm64
+@@ -37,3 +37,7 @@ SOC_ROCKCHIP_RK3328		opt_soc.h
+ SOC_ROCKCHIP_RK3399		opt_soc.h
+ SOC_ROCKCHIP_RK3568		opt_soc.h
+ SOC_XILINX_ZYNQ			opt_soc.h
++SOC_FIREFLY_V1          opt_soc.h
++SOC_FIREFLY_V2          opt_soc.h
++SOC_FIREFLY_V3          opt_soc.h
++SOC_FIREFLY_V4          opt_soc.h
+\ No newline at end of file
+diff --git a/sys/contrib/device-tree/src/arm64/firefly/firefly_dsk_v1.dts b/sys/contrib/device-tree/src/arm64/firefly/firefly_dsk_v1.dts
+new file mode 100644
+index 000000000..dd3d64377
+--- /dev/null
++++ b/sys/contrib/device-tree/src/arm64/firefly/firefly_dsk_v1.dts
+@@ -0,0 +1,61 @@
++/dts-v1/;
++/memreserve/ 0x80000000 0x10000;
++
++#include "firefly_v1.dtsi"
++
++/{
++	model = "Firefly Development Board v1";
++	compatible = "firefly,dsk_v1";
++	#address-cells = <2>;
++	#size-cells = <2>;
++
++	chosen {
++		stdout-path = "uart1:115200n8";
++	};
++
++	memory@0{
++		device_type = "memory";
++		reg = <0x0 0x80000000 0x1 0x00000000>;
++	};
++
++	memory@1{
++		device_type = "memory";
++		reg = <0x20 0x00000000 0x1 0x00000000>;
++	};
++
++	firmware {
++		optee {
++			compatible = "linaro,optee-tz";
++			method = "smc";
++		};
++	};
++};
++
++&uart1 {
++	status = "ok";
++};
++
++&gmac0 {
++	status = "ok";
++	phy-mode = "rgmii-id";
++};
++
++&gmac1 {
++	status = "ok";
++	phy-mode = "rgmii-id";
++};
++
++&i2c0 {
++	status = "ok";
++};
++
++&i2c1 {
++	status = "ok";
++	#address-cells = <1>;
++	#size-cells = <0>;
++
++	rtc@68 {
++		compatible = "dallas,ds1339";
++		reg = <0x68>;
++	};
++};
+diff --git a/sys/contrib/device-tree/src/arm64/firefly/firefly_dsk_v2.dts b/sys/contrib/device-tree/src/arm64/firefly/firefly_dsk_v2.dts
+new file mode 100644
+index 000000000..04e760d64
+--- /dev/null
++++ b/sys/contrib/device-tree/src/arm64/firefly/firefly_dsk_v2.dts
+@@ -0,0 +1,75 @@
++/dts-v1/;
++/memreserve/ 0x80000000 0x10000;
++
++#include "firefly_dsk_v2.dtsi"
++#include "dt-bindings/gpio/gpio.h"
++
++/{
++	model = "Firefly Dsk Board";
++	compatible = "firefly,v2";
++
++	chosen {
++		stdout-path = "serial1:115200n8";
++	};
++
++	memory@00{
++		device_type = "memory";
++		reg = <0x0 0x80000000 0x2 0x00000000>;
++	};
++};
++
++&soc {
++
++};
++
++&watchdog0 {
++	status = "okay";
++};
++
++&watchdog1 {
++	status = "okay";
++};
++
++&pcie {
++	status = "okay";
++};
++
++&usb3_0 {
++	status = "okay";
++};
++
++&sata0 {
++	status = "okay";
++};
++
++&sata1 {
++	status = "okay";
++};
++
++&macb0 {
++	phy-mode = "sgmii";
++	use-mii;
++	status = "okay";
++};
++
++&macb1 {
++	phy-mode = "sgmii";
++	use-mii;
++	status = "okay";
++};
++
++&uart0 {
++	status = "okay";
++};
++
++&uart1 {
++	status = "okay";
++};
++
++&uart2 {
++	status = "okay";
++};
++
++&uart3 {
++	status = "okay";
++};
+\ No newline at end of file
+diff --git a/sys/contrib/device-tree/src/arm64/firefly/firefly_dsk_v2.dtsi b/sys/contrib/device-tree/src/arm64/firefly/firefly_dsk_v2.dtsi
+new file mode 100644
+index 000000000..9c4b1a851
+--- /dev/null
++++ b/sys/contrib/device-tree/src/arm64/firefly/firefly_dsk_v2.dtsi
+@@ -0,0 +1,108 @@
++#include "firefly_v2.dtsi"
++
++/ {
++	compatible = "firefly,v2";
++
++	aliases {
++		ethernet0 = &macb0;
++		ethernet1 = &macb1;
++	};
++};
++
++&cpu {
++	cpu-map {
++		cluster0 {
++			core0 {
++				cpu = <&cpu_b0>;
++			};
++		};
++
++		cluster1 {
++			core0 {
++				cpu = <&cpu_b1>;
++			};
++		};
++
++		cluster2 {
++			core0 {
++				cpu = <&cpu_l0>;
++			};
++
++			core1 {
++				cpu = <&cpu_l1>;
++			};
++		};
++	};
++
++	cpu_l0: cpu@0 {
++		device_type = "cpu";
++		compatible = "arm,armv8";
++		reg = <0x0 0x200>;
++		enable-method = "psci";
++		capacity-dmips-mhz = <2850>;
++	};
++
++	cpu_l1: cpu@1 {
++		device_type = "cpu";
++		compatible = "arm,armv8";
++		reg = <0x0 0x201>;
++		enable-method = "psci";
++		capacity-dmips-mhz = <2850>;
++	};
++
++	cpu_b0: cpu@100 {
++		device_type = "cpu";
++		compatible = "arm,armv8";
++		reg = <0x0 0x0>;
++		enable-method = "psci";
++		capacity-dmips-mhz = <5660>;
++	};
++
++	cpu_b1: cpu@101 {
++		device_type = "cpu";
++		compatible = "arm,armv8";
++		reg = <0x0 0x100>;
++		enable-method = "psci";
++		capacity-dmips-mhz = <5660>;
++	};
++};
++
++&soc {
++	usb3_0: usb3@31a08000 {
++		compatible = "generic-xhci";
++		reg = <0x0 0x31a08000 0x0 0x18000>;
++		interrupts = <GIC_SPI 16 IRQ_TYPE_LEVEL_HIGH>;
++		status = "disabled";
++	};
++
++	macb0: ethernet@3200c000 {
++		compatible = "firefly,xmac";
++		reg = <0x0 0x3200c000 0x0 0x2000>;
++		interrupts = <GIC_SPI 55 IRQ_TYPE_LEVEL_HIGH>,
++			     <GIC_SPI 56 IRQ_TYPE_LEVEL_HIGH>,
++			     <GIC_SPI 57 IRQ_TYPE_LEVEL_HIGH>,
++			     <GIC_SPI 58 IRQ_TYPE_LEVEL_HIGH>,
++			     <GIC_SPI 28 IRQ_TYPE_LEVEL_HIGH>,
++			     <GIC_SPI 29 IRQ_TYPE_LEVEL_HIGH>,
++			     <GIC_SPI 30 IRQ_TYPE_LEVEL_HIGH>,
++			     <GIC_SPI 31 IRQ_TYPE_LEVEL_HIGH>;
++		clock-names = "pclk", "hclk", "tx_clk", "tsu_clk";
++		clocks = <&sysclk_250mhz>, <&sysclk_48mhz>, <&sysclk_48mhz>, <&sysclk_250mhz>;
++		magic-packet;
++		support-tsn;
++		status = "disabled";
++	};
++
++	macb1: ethernet@3200e000 {
++		compatible = "firefly,xmac";
++		reg = <0x0 0x3200e000 0x0 0x2000>;
++		interrupts = <GIC_SPI 59 IRQ_TYPE_LEVEL_HIGH>,
++			     <GIC_SPI 60 IRQ_TYPE_LEVEL_HIGH>,
++			     <GIC_SPI 61 IRQ_TYPE_LEVEL_HIGH>,
++			     <GIC_SPI 62 IRQ_TYPE_LEVEL_HIGH>;
++		clock-names = "pclk", "hclk", "tx_clk", "tsu_clk";
++		clocks = <&sysclk_250mhz>, <&sysclk_48mhz>, <&sysclk_48mhz>, <&sysclk_250mhz>;
++		magic-packet;
++		status = "disabled";
++	};
++};
+diff --git a/sys/contrib/device-tree/src/arm64/firefly/firefly_dsk_v3.dts b/sys/contrib/device-tree/src/arm64/firefly/firefly_dsk_v3.dts
+new file mode 100644
+index 000000000..084e9dea2
+--- /dev/null
++++ b/sys/contrib/device-tree/src/arm64/firefly/firefly_dsk_v3.dts
+@@ -0,0 +1,48 @@
++/dts-v1/;
++/memreserve/ 0x80000000 0x10000;
++
++#include "firefly_v3.dtsi"
++
++/{
++	model = "Firefly Development Board v3";
++	compatible = "firefly,dsk_v3";
++	#address-cells = <2>;
++	#size-cells = <2>;
++
++	chosen {
++		stdout-path = "uart1:115200n8";
++	};
++
++	memory@80000000 {
++		device_type = "memory";
++		reg = <0x00 0x80000000 0x00 0x7b000000>;
++	};
++};
++
++&uart1 {
++	status = "ok";
++};
++
++&uart0 {
++	status = "ok";
++};
++
++&macb0 {
++	phy-mode = "sgmii";
++	use-mii;
++	status = "ok";
++};
++
++&macb1 {
++	phy-mode = "sgmii";
++	use-mii;
++	status = "ok";
++};
++
++&sata0 {
++	status = "okay";
++};
++
++&pcie {
++	status = "okay";
++};
+\ No newline at end of file
+diff --git a/sys/contrib/device-tree/src/arm64/firefly/firefly_pi_v2.dts b/sys/contrib/device-tree/src/arm64/firefly/firefly_pi_v2.dts
+new file mode 100644
+index 000000000..c021e7c4c
+--- /dev/null
++++ b/sys/contrib/device-tree/src/arm64/firefly/firefly_pi_v2.dts
+@@ -0,0 +1,67 @@
++/dts-v1/;
++/memreserve/ 0x80000000 0x10000;
++
++#include "firefly_pi_v2.dtsi"
++#include "dt-bindings/gpio/gpio.h"
++
++/{
++	model = "Firefly Pi Board";
++	compatible = "firefly,pi_v2";
++
++	chosen {
++		stdout-path = "serial1:115200n8";
++	};
++
++	memory@00{
++		device_type = "memory";
++		reg = <0x0 0x80000000 0x2 0x00000000>;
++	};
++};
++
++&soc {
++
++};
++
++&watchdog0 {
++	status = "okay";
++};
++
++&watchdog1 {
++	status = "okay";
++};
++
++&pcie {
++	status = "okay";
++};
++
++&usb3_0 {
++	status = "okay";
++};
++
++&macb0 {
++	phy-mode = "sgmii";
++	use-mii;
++	status = "okay";
++};
++
++&macb1 {
++	phy-mode = "sgmii";
++	use-mii;
++	status = "okay";
++};
++
++&uart0 {
++	status = "okay";
++};
++
++&uart1 {
++	status = "okay";
++};
++
++&uart2 {
++	status = "okay";
++};
++
++&uart3 {
++	status = "okay";
++};
+\ No newline at end of file
+diff --git a/sys/contrib/device-tree/src/arm64/firefly/firefly_pi_v2.dtsi b/sys/contrib/device-tree/src/arm64/firefly/firefly_pi_v2.dtsi
+new file mode 100644
+index 000000000..c2348ed78
+--- /dev/null
++++ b/sys/contrib/device-tree/src/arm64/firefly/firefly_pi_v2.dtsi
+@@ -0,0 +1,108 @@
++#include "firefly_v2.dtsi"
++
++/ {
++	compatible = "firefly,pi_v2";
++
++	aliases {
++		ethernet0 = &macb0;
++		ethernet1 = &macb1;
++	};
++};
++
++&cpu {
++	cpu-map {
++		cluster0 {
++			core0 {
++				cpu = <&cpu_b0>;
++			};
++		};
++
++		cluster1 {
++			core0 {
++				cpu = <&cpu_b1>;
++			};
++		};
++
++		cluster2 {
++			core0 {
++				cpu = <&cpu_l0>;
++			};
++
++			core1 {
++				cpu = <&cpu_l1>;
++			};
++		};
++	};
++
++	cpu_l0: cpu@0 {
++		device_type = "cpu";
++		compatible = "arm,armv8";
++		reg = <0x0 0x200>;
++		enable-method = "psci";
++		capacity-dmips-mhz = <2850>;
++	};
++
++	cpu_l1: cpu@1 {
++		device_type = "cpu";
++		compatible = "arm,armv8";
++		reg = <0x0 0x201>;
++		enable-method = "psci";
++		capacity-dmips-mhz = <2850>;
++	};
++
++	cpu_b0: cpu@100 {
++		device_type = "cpu";
++		compatible = "arm,armv8";
++		reg = <0x0 0x0>;
++		enable-method = "psci";
++		capacity-dmips-mhz = <5660>;
++	};
++
++	cpu_b1: cpu@101 {
++		device_type = "cpu";
++		compatible = "arm,armv8";
++		reg = <0x0 0x100>;
++		enable-method = "psci";
++		capacity-dmips-mhz = <5660>;
++	};
++};
++
++&soc {
++	usb3_0: usb3@31a08000 {
++		compatible = "generic-xhci";
++		reg = <0x0 0x31a08000 0x0 0x18000>;
++		interrupts = <GIC_SPI 16 IRQ_TYPE_LEVEL_HIGH>;
++		status = "disabled";
++	};
++
++	macb0: ethernet@3200c000 {
++		compatible = "firefly,xmac";
++		reg = <0x0 0x3200c000 0x0 0x2000>;
++		interrupts = <GIC_SPI 55 IRQ_TYPE_LEVEL_HIGH>,
++			     <GIC_SPI 56 IRQ_TYPE_LEVEL_HIGH>,
++			     <GIC_SPI 57 IRQ_TYPE_LEVEL_HIGH>,
++			     <GIC_SPI 58 IRQ_TYPE_LEVEL_HIGH>,
++			     <GIC_SPI 28 IRQ_TYPE_LEVEL_HIGH>,
++			     <GIC_SPI 29 IRQ_TYPE_LEVEL_HIGH>,
++			     <GIC_SPI 30 IRQ_TYPE_LEVEL_HIGH>,
++			     <GIC_SPI 31 IRQ_TYPE_LEVEL_HIGH>;
++		clock-names = "pclk", "hclk", "tx_clk", "tsu_clk";
++		clocks = <&sysclk_250mhz>, <&sysclk_48mhz>, <&sysclk_48mhz>, <&sysclk_250mhz>;
++		magic-packet;
++		support-tsn;
++		status = "disabled";
++	};
++
++	macb1: ethernet@3200e000 {
++		compatible = "firefly,xmac";
++		reg = <0x0 0x3200e000 0x0 0x2000>;
++		interrupts = <GIC_SPI 59 IRQ_TYPE_LEVEL_HIGH>,
++			     <GIC_SPI 60 IRQ_TYPE_LEVEL_HIGH>,
++			     <GIC_SPI 61 IRQ_TYPE_LEVEL_HIGH>,
++			     <GIC_SPI 62 IRQ_TYPE_LEVEL_HIGH>;
++		clock-names = "pclk", "hclk", "tx_clk", "tsu_clk";
++		clocks = <&sysclk_250mhz>, <&sysclk_48mhz>, <&sysclk_48mhz>, <&sysclk_250mhz>;
++		magic-packet;
++		status = "disabled";
++	};
++};
+diff --git a/sys/contrib/device-tree/src/arm64/firefly/firefly_v1.dtsi b/sys/contrib/device-tree/src/arm64/firefly/firefly_v1.dtsi
+new file mode 100644
+index 000000000..822d6aec3
+--- /dev/null
++++ b/sys/contrib/device-tree/src/arm64/firefly/firefly_v1.dtsi
+@@ -0,0 +1,291 @@
++
++#include <dt-bindings/interrupt-controller/arm-gic.h>
++
++/ {
++	compatible = "firefly,dsk_v1";
++	interrupt-parent = <&gic>;
++	#address-cells = <2>;
++	#size-cells = <2>;
++
++	aliases {
++		ethernet0 = &gmac0;
++		ethernet1 = &gmac1;
++	};
++
++	psci {
++		compatible   = "arm,psci-1.0";
++		method       = "smc";
++		cpu_suspend  = <0xc4000001>;
++		cpu_off      = <0x84000002>;
++		cpu_on       = <0xc4000003>;
++		sys_poweroff = <0x84000008>;
++		sys_reset    = <0x84000009>;
++	};
++
++	cpus {
++		#address-cells = <0x2>;
++		#size-cells = <0x0>;
++
++		cpu0: cpu@0 {
++			device_type = "cpu";
++			compatible = "arm,armv8";
++			reg = <0x0 0x0>;
++			enable-method = "psci";
++			numa-node-id = <0>;
++		};
++
++		cpu1: cpu@1 {
++			device_type = "cpu";
++			compatible = "arm,armv8";
++			reg = <0x0 0x1>;
++			enable-method = "psci";
++			numa-node-id = <0>;
++		};
++
++		cpu2: cpu@100 {
++			device_type = "cpu";
++			compatible = "arm,armv8";
++			reg = <0x0 0x100>;
++			enable-method = "psci";
++			numa-node-id = <0>;
++		};
++
++		cpu3: cpu@101 {
++			device_type = "cpu";
++			compatible = "arm,armv8";
++			reg = <0x0 0x101>;
++			enable-method = "psci";
++			numa-node-id = <0>;
++		};
++
++		cpu4: cpu@200 {
++			device_type = "cpu";
++			compatible = "arm,armv8";
++			reg = <0x0 0x200>;
++			enable-method = "psci";
++			numa-node-id = <0>;
++		};
++
++		cpu5: cpu@201 {
++			device_type = "cpu";
++			compatible = "arm,armv8";
++			reg = <0x0 0x201>;
++			enable-method = "psci";
++			numa-node-id = <0>;
++		};
++
++		cpu6: cpu@300 {
++			device_type = "cpu";
++			compatible = "arm,armv8";
++			reg = <0x0 0x300>;
++			enable-method = "psci";
++			numa-node-id = <0>;
++		};
++
++		cpu7: cpu@301 {
++			device_type = "cpu";
++			compatible = "arm,armv8";
++			reg = <0x0 0x301>;
++			enable-method = "psci";
++			numa-node-id = <0>;
++		};
++	};
++
++	gic: interrupt-controller@29900000 {
++		compatible = "arm,gic-v3";
++		#interrupt-cells = <3>;
++		#address-cells = <2>;
++		#size-cells = <2>;
++		ranges;
++		interrupt-controller;
++		reg = <0x0 0x29a00000 0 0x20000>,       /* GICD */
++		      <0x0 0x29b00000 0 0x100000>,       /* GICR */
++		      <0x0 0x29c00000 0 0x10000>,       /* GICC */
++		      <0x0 0x29c10000 0 0x10000>,       /* GICH */
++		      <0x0 0x29c20000 0 0x10000>;       /* GICV */
++		interrupts = <GIC_PPI 9 IRQ_TYPE_LEVEL_HIGH>;
++
++		its: gic-its@29920000 {
++			compatible = "arm,gic-v3-its";
++			msi-controller;
++			reg = <0x0 0x29a20000 0x0 0x20000>;
++		};
++	};
++
++	timer {
++		compatible = "arm,armv8-timer";
++		interrupts = <GIC_PPI 13 IRQ_TYPE_LEVEL_LOW>,
++			     <GIC_PPI 14 IRQ_TYPE_LEVEL_LOW>,
++			     <GIC_PPI 11 IRQ_TYPE_LEVEL_LOW>,
++			     <GIC_PPI 10 IRQ_TYPE_LEVEL_LOW>;
++		clock-frequency = <48000000>;
++	};
++
++	pmu {
++		compatible = "arm,armv8-pmuv3";
++		interrupts = <GIC_PPI 7 IRQ_TYPE_LEVEL_LOW>;
++	};
++
++	clocks {
++		#address-cells = <2>;
++		#size-cells = <2>;
++		ranges;
++
++		clk250mhz: clk250mhz {
++			compatible = "fixed-clock";
++			#clock-cells = <0>;
++			clock-frequency = <250000000>;
++		};
++
++		sysclk_48mhz: clk48mhz {
++			compatible = "fixed-clock";
++			#clock-cells = <0>;
++			clock-frequency = <48000000>;
++		};
++
++		sysclk_600mhz: clk600mhz {
++			compatible = "fixed-clock";
++			#clock-cells = <0>;
++			clock-frequency = <600000000>;
++		};
++	};
++
++	soc {
++		compatible = "simple-bus";
++		#address-cells = <2>;
++		#size-cells = <2>;
++		dma-coherent;
++		ranges;
++
++		uart0: uart@28000000 {
++			compatible = "arm,pl011", "arm,primecell";
++			reg = <0x0 0x28000000 0x0 0x1000>;
++			baud = <115200>;
++			reg-shift = <2>;
++			reg-io-width = <4>;
++			interrupts = <GIC_SPI 6 IRQ_TYPE_LEVEL_HIGH>;
++			clocks = <&sysclk_48mhz &sysclk_48mhz>;
++			clock-names = "uartclk", "apb_pclk";
++		};
++
++		uart1: uart@28001000 {
++			compatible = "arm,pl011", "arm,primecell";
++			reg = <0x0 0x28001000 0x0 0x1000>;
++			baud = <115200>;
++			reg-shift = <2>;
++			reg-io-width = <4>;
++			interrupts = <GIC_SPI 7 IRQ_TYPE_LEVEL_HIGH>;
++			clocks = <&sysclk_48mhz &sysclk_48mhz>;
++			clock-names = "uartclk", "apb_pclk";
++		};
++
++		uart2: uart@28002000 {
++			compatible = "arm,pl011", "arm,primecell";
++			reg = <0x0 0x28002000 0x0 0x1000>;
++			baud = <115200>;
++			reg-shift = <2>;
++			reg-io-width = <4>;
++			interrupts = <GIC_SPI 8 IRQ_TYPE_LEVEL_HIGH>;
++			clocks = <&sysclk_48mhz &sysclk_48mhz>;
++			clock-names = "uartclk", "apb_pclk";
++		};
++
++		uart3: uart@28003000 {
++			compatible = "arm,pl011", "arm,primecell";
++			reg = <0x0 0x28003000 0x0 0x1000>;
++			baud = <115200>;
++			reg-shift = <2>;
++			reg-io-width = <4>;
++			interrupts = <GIC_SPI 9 IRQ_TYPE_LEVEL_HIGH>;
++			clocks = <&sysclk_48mhz &sysclk_48mhz>;
++			clock-names = "uartclk", "apb_pclk";
++		};
++
++		watchdog0: watchdog@2800a000 {
++			compatible = "arm,sbsa-gwdt";
++			reg = <0x0 0x2800b000 0x0 0x1000>,
++			      <0x0 0x2800a000 0x0 0x1000>;
++			interrupts = <GIC_SPI 16 IRQ_TYPE_LEVEL_HIGH>;
++			timeout-sec = <30>;
++		};
++
++		watchdog1: watchdog@28016000 {
++			compatible = "arm,sbsa-gwdt";
++			reg = <0x0 0x28017000 0x0 0x1000>,
++			      <0x0 0x28016000 0x0 0x1000>;
++			interrupts = <GIC_SPI 17 IRQ_TYPE_LEVEL_HIGH>;
++			timeout-sec = <30>;
++		};
++
++		i2c0: i2c@28006000 {
++			compatible = "snps,designware-i2c";
++			reg = <0x0 0x28006000 0x0 0x1000>;
++			interrupts = <GIC_SPI 12 IRQ_TYPE_LEVEL_HIGH>;
++			clocks = <&sysclk_48mhz>;
++			status = "disabled";
++		};
++
++		i2c1: i2c@28007000 {
++			compatible = "snps,designware-i2c";
++			reg = <0x0 0x28007000 0x0 0x1000>;
++			interrupts = <GIC_SPI 13 IRQ_TYPE_LEVEL_HIGH>;
++			clocks = <&sysclk_48mhz>;
++			status = "disabled";
++		};
++
++		i2c2: i2c@28008000 {
++			compatible = "snps,designware-i2c";
++			reg = <0x0 0x28008000 0x0 0x1000>;
++			interrupts = <GIC_SPI 14 IRQ_TYPE_LEVEL_HIGH>;
++			clocks = <&sysclk_48mhz>;
++			status = "disabled";
++		};
++
++		i2c3: i2c@28009000 {
++			compatible = "snps,designware-i2c";
++			reg = <0x0 0x28009000 0x0 0x1000>;
++			interrupts = <GIC_SPI 15 IRQ_TYPE_LEVEL_HIGH>;
++			clocks = <&sysclk_48mhz>;
++			status = "disabled";
++		};
++
++		gmac0: eth@2820c000 {
++			compatible = "firefly,gmac";
++			reg = <0x0 0x2820c000 0x0 0x2000>;
++			interrupts = <GIC_SPI 49 IRQ_TYPE_LEVEL_HIGH>;
++			ref-clock-num = <0>;
++			status = "disabled";
++		};
++
++		gmac1: eth@28210000 {
++			compatible = "firefly,gmac";
++			reg = <0x0 0x28210000 0x0 0x2000>;
++			interrupts = <GIC_SPI 50 IRQ_TYPE_LEVEL_HIGH>;
++			ref-clock-num = <0>;
++			status = "disabled";
++		};
++
++		pcie: pcie {
++			compatible = "pci-host-ecam-generic";
++			device_type = "pci";
++			#address-cells = <3>;
++			#size-cells = <2>;
++			#interrupt-cells = <1>;
++			reg = <0x0 0x40000000 0x0 0x10000000>;
++			msi-parent = <&its>;
++			bus-range = <0x0 0xff>;
++			interrupt-map-mask = <0x0 0x0 0x0 0x7>;
++			/*interrupt-map = <0x0 0x0 0x0 0x1 &ixic 0x0 0x0 GIC_SPI 28 IRQ_TYPE_LEVEL_HIGH>,
++					<0x0 0x0 0x0 0x2 &ixic 0x0 0x0 GIC_SPI 29 IRQ_TYPE_LEVEL_HIGH>,
++					<0x0 0x0 0x0 0x3 &ixic 0x0 0x0 GIC_SPI 30 IRQ_TYPE_LEVEL_HIGH>,
++					<0x0 0x0 0x0 0x4 &ixic 0x0 0x0 GIC_SPI 31 IRQ_TYPE_LEVEL_HIGH>;*/
++			interrupt-map = <0x0 0x0 0x0 0x1 &gic 0x0 0x0 GIC_SPI 28 IRQ_TYPE_LEVEL_HIGH>,
++					<0x0 0x0 0x0 0x2 &gic 0x0 0x0 GIC_SPI 29 IRQ_TYPE_LEVEL_HIGH>,
++					<0x0 0x0 0x0 0x3 &gic 0x0 0x0 GIC_SPI 30 IRQ_TYPE_LEVEL_HIGH>,
++					<0x0 0x0 0x0 0x4 &gic 0x0 0x0 GIC_SPI 31 IRQ_TYPE_LEVEL_HIGH>;
++			ranges = <0x01000000  0x0 0x00000000  0x0 0x50000000  0x0 0x00f00000>,
++				 <0x02000000  0x0 0x58000000  0x0 0x58000000  0x0 0x28000000>,
++				 <0x03000000 0x10 0x00000000 0x10 0x00000000 0x10 0x00000000>;
++		};
++	};
++};
+diff --git a/sys/contrib/device-tree/src/arm64/firefly/firefly_v2.dtsi b/sys/contrib/device-tree/src/arm64/firefly/firefly_v2.dtsi
+new file mode 100644
+index 000000000..7e3a650be
+--- /dev/null
++++ b/sys/contrib/device-tree/src/arm64/firefly/firefly_v2.dtsi
+@@ -0,0 +1,233 @@
++
++#include <dt-bindings/interrupt-controller/arm-gic.h>
++
++/ {
++	compatible = "firefly,pi_v2";
++	interrupt-parent = <&gic>;
++	#address-cells = <2>;
++	#size-cells = <2>;
++
++	aliases {
++		serial0 = &uart0;
++		serial1 = &uart1;
++		serial2 = &uart2;
++		serial3 = &uart3;
++	};
++
++	psci {
++		compatible   = "arm,psci-1.0";
++		method       = "smc";
++		cpu_suspend  = <0xc4000001>;
++		cpu_off      = <0x84000002>;
++		cpu_on       = <0xc4000003>;
++		sys_poweroff = <0x84000008>;
++		sys_reset    = <0x84000009>;
++	};
++
++	cpu: cpus {
++		#address-cells = <0x2>;
++		#size-cells = <0x0>;
++	};
++
++	gic: interrupt-controller@30800000 {
++		compatible = "arm,gic-v3";
++		#interrupt-cells = <3>;
++		#address-cells = <2>;
++		#size-cells = <2>;
++		ranges;
++		interrupt-controller;
++		reg = <0x0 0x30800000 0 0x20000>,	/* GICD */
++		      <0x0 0x30880000 0 0x80000>,	/* GICR */
++		      <0x0 0x30840000 0 0x10000>,	/* GICC */
++		      <0x0 0x30850000 0 0x10000>,	/* GICH */
++		      <0x0 0x30860000 0 0x10000>;	/* GICV */
++		interrupts = <GIC_PPI 9 IRQ_TYPE_LEVEL_LOW>;
++
++		its: gic-its@30820000 {
++			compatible = "arm,gic-v3-its";
++			msi-controller;
++			reg = <0x0 0x30820000 0x0 0x20000>;
++		};
++	};
++
++	pmu {
++		compatible = "arm,armv8-pmuv3";
++		interrupts = <GIC_PPI 7 IRQ_TYPE_LEVEL_LOW>;
++	};
++
++	timer {
++		compatible = "arm,armv8-timer";
++		interrupts = <GIC_PPI 13 IRQ_TYPE_LEVEL_LOW>,
++			     <GIC_PPI 14 IRQ_TYPE_LEVEL_LOW>,
++			     <GIC_PPI 11 IRQ_TYPE_LEVEL_LOW>,
++			     <GIC_PPI 10 IRQ_TYPE_LEVEL_LOW>;
++		clock-frequency = <50000000>;
++	};
++
++	clocks {
++		#address-cells = <2>;
++		#size-cells = <2>;
++		ranges;
++
++		sysclk_48mhz: clk48mhz {
++			compatible = "fixed-clock";
++			#clock-cells = <0>;
++			clock-frequency = <48000000>;
++		};
++
++		sysclk_50mhz: clk50mhz {
++			compatible = "fixed-clock";
++			#clock-cells = <0>;
++			clock-frequency = <50000000>;
++		};
++
++		sysclk_100mhz: clk100mhz {
++			compatible = "fixed-clock";
++			#clock-cells = <0>;
++			clock-frequency = <100000000>;
++		};
++
++		sysclk_200mhz: clk200mhz {
++			compatible = "fixed-clock";
++			#clock-cells = <0>;
++			clock-frequency = <200000000>;
++		};
++
++		sysclk_250mhz: clk250mhz {
++			compatible = "fixed-clock";
++			#clock-cells = <0>;
++			clock-frequency = <250000000>;
++		};
++
++		sysclk_300mhz: clk300mhz {
++			compatible = "fixed-clock";
++			#clock-cells = <0>;
++			clock-frequency = <300000000>;
++		};
++
++		sysclk_600mhz: clk600mhz {
++			compatible = "fixed-clock";
++			#clock-cells = <0>;
++			clock-frequency = <600000000>;
++		};
++
++		sysclk_1200mhz: clk1200mhz {
++			compatible = "fixed-clock";
++			#clock-cells = <0>;
++			clock-frequency = <1200000000>;
++		};
++	};
++
++	smmu: iommu@30000000 {
++		compatible = "arm,smmu-v3";
++		reg = <0x0 0x30000000 0x0 0x800000>;
++		interrupts = <GIC_SPI 240 IRQ_TYPE_EDGE_RISING>,
++			     <GIC_SPI 239 IRQ_TYPE_EDGE_RISING>,
++			     <GIC_SPI 236 IRQ_TYPE_EDGE_RISING>,
++			     <GIC_SPI 242 IRQ_TYPE_EDGE_RISING>;
++		interrupt-names = "eventq", "priq", "cmdq-sync", "gerror";
++		dma-coherent;
++		#iommu-cells = <1>;
++	};
++
++	soc: soc {
++		compatible = "simple-bus";
++		#address-cells = <2>;
++		#size-cells = <2>;
++		dma-coherent;
++		ranges;
++
++		uart0: uart@2800c000 {
++			compatible = "arm,pl011","arm,primecell";
++			reg = <0x0 0x2800c000 0x0 0x1000>;
++			interrupts = <GIC_SPI 83 IRQ_TYPE_LEVEL_HIGH>;
++			clocks = <&sysclk_100mhz &sysclk_100mhz>;
++			clock-names = "uartclk", "apb_pclk";
++			current-speed = <115200>;
++			status = "disabled";
++		};
++
++		uart1: uart@2800d000 {
++			compatible = "arm,pl011","arm,primecell";
++			reg = <0x0 0x2800d000 0x0 0x1000>;
++			interrupts = <GIC_SPI 84 IRQ_TYPE_LEVEL_HIGH>;
++			clocks = <&sysclk_100mhz &sysclk_100mhz>;
++			clock-names = "uartclk", "apb_pclk";
++			current-speed = <115200>;
++			status = "disabled";
++		};
++
++		uart2: uart@2800e000 {
++			compatible = "arm,pl011","arm,primecell";
++			reg = <0x0 0x2800e000 0x0 0x1000>;
++			interrupts = <GIC_SPI 85 IRQ_TYPE_LEVEL_HIGH>;
++			clocks = <&sysclk_100mhz &sysclk_100mhz>;
++			clock-names = "uartclk", "apb_pclk";
++			current-speed = <115200>;
++			status = "disabled";
++		};
++
++		uart3: uart@2800f000 {
++			compatible = "arm,pl011","arm,primecell";
++			reg = <0x0 0x2800f000 0x0 0x1000>;
++			interrupts = <GIC_SPI 86 IRQ_TYPE_LEVEL_HIGH>;
++			clocks = <&sysclk_100mhz &sysclk_100mhz>;
++			clock-names = "uartclk", "apb_pclk";
++			current-speed = <115200>;
++			status = "disabled";
++		};
++
++		watchdog0: watchdog@28040000 {
++			compatible = "arm,sbsa-gwdt";
++			reg = <0x0 0x28041000 0x0 0x1000>,
++			      <0x0 0x28040000 0x0 0x1000>;
++			interrupts = <GIC_SPI 164 IRQ_TYPE_LEVEL_HIGH>;
++			timeout-sec = <30>;
++			status = "disabled";
++		};
++
++		watchdog1: watchdog@28042000 {
++			compatible = "arm,sbsa-gwdt";
++			reg = <0x0 0x28043000 0x0 0x1000>,
++			      <0x0 0x28042000 0x0 0x1000>;
++			interrupts = <GIC_SPI 165 IRQ_TYPE_LEVEL_HIGH>;
++			timeout-sec = <30>;
++			status = "disabled";
++		};
++
++		sata0: sata@31a40000 {
++			compatible = "generic-ahci";
++			reg = <0x0 0x31a40000 0x0 0x1000>;
++			interrupts = <GIC_SPI 42 IRQ_TYPE_LEVEL_HIGH>;
++			status = "disabled";
++		};
++
++		sata1: sata@32014000 {
++			compatible = "generic-ahci";
++			reg = <0x0 0x32014000 0x0 0x1000>;
++			interrupts = <GIC_SPI 43 IRQ_TYPE_LEVEL_HIGH>;
++			status = "disabled";
++		};
++
++		pcie: pcie@40000000 {
++			compatible = "pci-host-ecam-generic";
++			device_type = "pci";
++			#address-cells = <3>;
++			#size-cells = <2>;
++			#interrupt-cells = <1>;
++			reg = <0x0 0x40000000 0x0 0x10000000>;
++			msi-parent = <&its>;
++			bus-range = <0x0 0xff>;
++			interrupt-map-mask = <0x0 0x0 0x0 0x7>;
++			interrupt-map = <0x0 0x0 0x0 0x1 &gic 0x0 0x0 GIC_SPI 4 IRQ_TYPE_LEVEL_HIGH>,
++					<0x0 0x0 0x0 0x2 &gic 0x0 0x0 GIC_SPI 5 IRQ_TYPE_LEVEL_HIGH>,
++					<0x0 0x0 0x0 0x3 &gic 0x0 0x0 GIC_SPI 6 IRQ_TYPE_LEVEL_HIGH>,
++					<0x0 0x0 0x0 0x4 &gic 0x0 0x0 GIC_SPI 7 IRQ_TYPE_LEVEL_HIGH>;
++			ranges = <0x01000000 0x00 0x00000000 0x0  0x50000000  0x0  0x00f00000>,
++				 <0x02000000 0x00 0x58000000 0x0  0x58000000  0x0  0x28000000>,
++				 <0x03000000 0x10 0x00000000 0x10 0x00000000 0x10  0x00000000>;
++			iommu-map = <0x0 &smmu 0x0 0x10000>;
++			status = "disabled";
++		};
++	};
++};
+diff --git a/sys/contrib/device-tree/src/arm64/firefly/firefly_v3.dtsi b/sys/contrib/device-tree/src/arm64/firefly/firefly_v3.dtsi
+new file mode 100644
+index 000000000..8af3e8070
+--- /dev/null
++++ b/sys/contrib/device-tree/src/arm64/firefly/firefly_v3.dtsi
+@@ -0,0 +1,314 @@
++#include <dt-bindings/interrupt-controller/arm-gic.h>
++
++/ {
++	compatible = "firefly,dsk_v3";
++	interrupt-parent = <&gic>;
++	#address-cells = <2>;
++	#size-cells = <2>;
++
++	aliases {
++		ethernet0 = &macb0;
++		ethernet1 = &macb1;
++	};
++
++	psci {
++		compatible   = "arm,psci-1.0", "arm,psci-0.2", "arm,psci";
++		method       = "smc";
++		cpu_suspend  = <0xc4000001>;
++		cpu_off      = <0x84000002>;
++		cpu_on       = <0xc4000003>;
++		sys_poweroff = <0x84000008>;
++		sys_reset    = <0x84000009>;
++	};
++
++	cpus {
++		#address-cells = <0x2>;
++		#size-cells = <0x0>;
++		cpu@0 {
++			device_type = "cpu";
++			compatible = "arm,armv8";
++			reg = <0x0 0x0>;
++			enable-method = "psci";
++		};
++		cpu@1 {
++			device_type = "cpu";
++			compatible = "arm,armv8";
++			reg = <0x0 0x100>;
++			enable-method = "psci";
++		};
++		cpu@2 {
++			device_type = "cpu";
++			compatible = "arm,armv8";
++			reg = <0x0 0x200>;
++			enable-method = "psci";
++		};
++		cpu@3 {
++			device_type = "cpu";
++			compatible = "arm,armv8";
++			reg = <0x0 0x300>;
++			enable-method = "psci";
++		};
++		cpu@4 {
++			device_type = "cpu";
++			compatible = "arm,armv8";
++			reg = <0x0 0x10000>;
++			enable-method = "psci";
++		};
++		cpu@5 {
++			device_type = "cpu";
++			compatible = "arm,armv8";
++			reg = <0x0 0x10100>;
++			enable-method = "psci";
++		};
++		cpu@6 {
++			device_type = "cpu";
++			compatible = "arm,armv8";
++			reg = <0x0 0x10200>;
++			enable-method = "psci";
++		};
++		cpu@7 {
++			device_type = "cpu";
++			compatible = "arm,armv8";
++			reg = <0x0 0x10300>;
++			enable-method = "psci";
++		};
++	};
++
++	gic: interrupt-controller@36800000 {
++		compatible = "arm,gic-v3";
++		#interrupt-cells = <3>;
++		#address-cells = <2>;
++		#size-cells = <2>;
++		ranges;
++		interrupt-controller;
++		reg = <0x0 0x36800000 0 0x20000>,       /* GICD */
++		      <0x0 0x36860000 0 0x100000>;      /* GICR */
++
++		interrupts = <GIC_PPI 9 IRQ_TYPE_LEVEL_HIGH>;
++
++		its: gic-its@36840000 {
++			compatible = "arm,gic-v3-its";
++			msi-controller;
++			reg = <0x0 0x36840000 0x0 0x20000>;
++		};
++	};
++
++	timer {
++		compatible = "arm,armv8-timer";
++		interrupts = <GIC_PPI 13 IRQ_TYPE_LEVEL_LOW>,
++			     <GIC_PPI 14 IRQ_TYPE_LEVEL_LOW>,
++			     <GIC_PPI 11 IRQ_TYPE_LEVEL_LOW>,
++			     <GIC_PPI 10 IRQ_TYPE_LEVEL_LOW>;
++		clock-frequency = <50000000>;
++	};
++
++	pmu {
++		compatible = "arm,armv8-pmuv3";
++		interrupts = <GIC_PPI 7 IRQ_TYPE_LEVEL_LOW>;
++	};
++
++	clocks {
++		#address-cells = <2>;
++		#size-cells = <2>;
++		ranges;
++
++		sysclk_250mhz: clk250mhz {
++			compatible = "fixed-clock";
++			#clock-cells = <0>;
++			clock-frequency = <250000000>;
++		};
++
++		sysclk_48mhz: clk48mhz {
++			compatible = "fixed-clock";
++			#clock-cells = <0>;
++			clock-frequency = <48000000>;
++		};
++
++		sysclk_50mhz: clk50mhz {
++			compatible = "fixed-clock";
++			#clock-cells = <0>;
++			clock-frequency = <50000000>;
++		};
++
++		sysclk_100mhz: clk100mhz {
++			compatible = "fixed-clock";
++			#clock-cells = <0>;
++			clock-frequency = <100000000>;
++		};
++
++		sysclk_200mhz: clk200mhz {
++			compatible = "fixed-clock";
++			#clock-cells = <0>;
++			clock-frequency = <200000000>;
++		};
++
++		sysclk_600mhz: clk600mhz {
++			compatible = "fixed-clock";
++			#clock-cells = <0>;
++			clock-frequency = <600000000>;
++		};
++
++		sysclk_1200mhz: clk1200mhz {
++			compatible = "fixed-clock";
++			#clock-cells = <0>;
++			clock-frequency = <1200000000>;
++		};
++
++		sysclk_300mhz: clk300mhz {
++			compatible = "fixed-clock";
++			#clock-cells = <0>;
++			clock-frequency = <300000000>;
++		};
++	};
++
++	smmu: iommu@36000000 {
++		compatible = "arm,smmu-v3";
++		reg = <0x0 0x36000000 0x0 0x800000>;
++		interrupts = <GIC_SPI 47 IRQ_TYPE_EDGE_RISING>,
++			     <GIC_SPI 46 IRQ_TYPE_EDGE_RISING>,
++			     <GIC_SPI 44 IRQ_TYPE_EDGE_RISING>,
++			     <GIC_SPI 49 IRQ_TYPE_EDGE_RISING>;
++		interrupt-names = "eventq", "priq", "cmdq-sync", "gerror";
++		dma-coherent;
++		#iommu-cells = <1>;
++	};
++
++	soc {
++		compatible = "simple-bus";
++		#address-cells = <2>;
++		#size-cells = <2>;
++		dma-coherent;
++		ranges;
++
++		uart0: uart@28008000 {
++			compatible = "arm,pl011", "arm,primecell";
++			reg = <0x0 0x28008000 0x0 0x1000>;
++			baud = <115200>;
++			reg-shift = <2>;
++			reg-io-width = <4>;
++			interrupts = <GIC_SPI 71 IRQ_TYPE_LEVEL_HIGH>;
++			clocks = <&sysclk_100mhz &sysclk_100mhz>;
++			clock-names = "uartclk", "apb_pclk";
++			status = "disabled";
++		};
++
++		uart1: uart@28009000 {
++			compatible = "arm,pl011", "arm,primecell";
++			reg = <0x0 0x28009000 0x0 0x1000>;
++			baud = <115200>;
++			reg-shift = <2>;
++			reg-io-width = <4>;
++			interrupts = <GIC_SPI 72 IRQ_TYPE_LEVEL_HIGH>;
++			clocks = <&sysclk_100mhz &sysclk_100mhz>;
++			clock-names = "uartclk", "apb_pclk";
++			status = "disabled";
++		};
++
++		uart2: uart@2800a000 {
++			compatible = "arm,pl011", "arm,primecell";
++			reg = <0x0 0x2800a000 0x0 0x1000>;
++			baud = <115200>;
++			reg-shift = <2>;
++			reg-io-width = <4>;
++			interrupts = <GIC_SPI 73 IRQ_TYPE_LEVEL_HIGH>;
++			clocks = <&sysclk_100mhz &sysclk_100mhz>;
++			clock-names = "uartclk", "apb_pclk";
++			status = "disabled";
++		};
++
++		uart3: uart@2800b000 {
++			compatible = "arm,pl011", "arm,primecell";
++			reg = <0x0 0x2800b000 0x0 0x1000>;
++			baud = <115200>;
++			reg-shift = <2>;
++			reg-io-width = <4>;
++			interrupts = <GIC_SPI 74 IRQ_TYPE_LEVEL_HIGH>;
++			clocks = <&sysclk_100mhz &sysclk_100mhz>;
++			clock-names = "uartclk", "apb_pclk";
++			status = "disabled";
++		};
++
++		watchdog0: watchdog@28014000 {
++			compatible = "arm,sbsa-gwdt";
++			reg = <0x0 0x28015000 0x0 0x1000>,
++			     <0x0 0x28014000 0x0 0x1000>;
++			interrupts = <GIC_SPI 80 IRQ_TYPE_LEVEL_HIGH>;
++			timeout-sec = <30>;
++		};
++
++		watchdog1: watchdog@28016000 {
++			compatible = "arm,sbsa-gwdt";
++			reg = <0x0 0x28017000 0x0 0x1000>,
++			     <0x0 0x28016000 0x0 0x1000>;
++			interrupts = <GIC_SPI 81 IRQ_TYPE_LEVEL_HIGH>;
++			timeout-sec = <30>;
++		};
++
++		macb0: eth0@36ce0000 {
++			compatible = "firefly,xmac_v2";
++			reg = <0 0x36ce0000 0x0 0x2000>;
++			interrupts = <GIC_SPI 32 IRQ_TYPE_LEVEL_HIGH>,
++				     <GIC_SPI 33 IRQ_TYPE_LEVEL_HIGH>,
++				     <GIC_SPI 34 IRQ_TYPE_LEVEL_HIGH>,
++				     <GIC_SPI 35 IRQ_TYPE_LEVEL_HIGH>;
++			clock-names = "pclk", "hclk", "tx_clk", "rx_clk","tsu_clk";
++			clocks = <&sysclk_250mhz>, <&sysclk_250mhz>,<&sysclk_250mhz>,
++				 <&sysclk_250mhz>,<&sysclk_300mhz>;
++			magic-packet;
++			dma-coherent;
++			queue-number = <0x01>;
++			status = "disabled";
++		};
++
++		macb1: eth1@36ce2000 {
++			compatible = "firefly,xmac_v2";
++			reg = <0 0x36ce2000 0x0 0x2000>;
++			interrupts = <GIC_SPI 36 IRQ_TYPE_LEVEL_HIGH>,
++				     <GIC_SPI 37 IRQ_TYPE_LEVEL_HIGH>,
++				     <GIC_SPI 38 IRQ_TYPE_LEVEL_HIGH>,
++				     <GIC_SPI 39 IRQ_TYPE_LEVEL_HIGH>;
++			clock-names = "pclk", "hclk", "tx_clk", "rx_clk","tsu_clk";
++			clocks = <&sysclk_250mhz>, <&sysclk_250mhz>,<&sysclk_250mhz>,
++				 <&sysclk_250mhz>,<&sysclk_300mhz>;
++			magic-packet;
++			dma-coherent;
++			queue-number = <0x01>;
++			status = "disabled";
++		};
++
++		sata0: sata@36ce5000 {
++			compatible = "generic-ahci";
++			reg = <0x0 0x36ce5000 0x0 0x1000>;
++			interrupts = <GIC_SPI 31 IRQ_TYPE_LEVEL_HIGH>;
++			status = "disabled";
++		};
++
++		pcie: pcie@40000000 {
++			compatible = "pci-host-ecam-generic";
++			device_type = "pci";
++			#address-cells = <3>;
++			#size-cells = <2>;
++			#interrupt-cells = <1>;
++			reg = <0x0 0x40000000 0x0 0x10000000>;
++			msi-parent = <&its>;
++			bus-range = <0x0 0xff>;
++			interrupt-map-mask = <0x0 0x0 0x0 0x7>;
++			interrupt-map = <0x0 0x0 0x0 0x1 &gic
++				     0x0 0x0 GIC_SPI 4 IRQ_TYPE_LEVEL_HIGH>,
++				     <0x0 0x0 0x0 0x2 &gic
++				     0x0 0x0 GIC_SPI 5 IRQ_TYPE_LEVEL_HIGH>,
++				     <0x0 0x0 0x0 0x3 &gic
++				     0x0 0x0 GIC_SPI 6 IRQ_TYPE_LEVEL_HIGH>,
++				     <0x0 0x0 0x0 0x4 &gic
++				     0x0 0x0 GIC_SPI 7 IRQ_TYPE_LEVEL_HIGH>;
++			ranges = <0x1000000 0x00 0x00 0x0  0x50000000  0x0  0xf00000>,
++				     <0x2000000 0x00 0x58000000 0x0  0x58000000  0x0  0x28000000>,
++				     <0x3000000 0x10 0x00000000 0x10 0x00000000  0x10 0x00000000>;
++			dma-ranges = <0x43000000 0x00 0x00 0x00 0x00 0x1000 0x00>;
++			iommu-map = <0x0 &smmu 0x0 0x10000>;
++			io-upper = <0x50005000>;
++			dma-coherent;
++			status = "disabled";
++		};
++	};
++};
+diff --git a/sys/dev/mii/mcommphy.c b/sys/dev/mii/mcommphy.c
+index 6948045aa..9d5490ff4 100644
+--- a/sys/dev/mii/mcommphy.c
++++ b/sys/dev/mii/mcommphy.c
+@@ -45,11 +45,16 @@
+ #include <dev/mii/miivar.h>
+ 
+ #include "miibus_if.h"
++#include "miidevs.h"
+ 
+ #define	MCOMMPHY_OUI			0x000000
+ #define	MCOMMPHY_MODEL			0x10
+ #define	MCOMMPHY_REV			0x0a
+ 
++#define	MOTORCOMM_OUI			0x000000
++#define	MOTORCOMM_MODEL			0x10
++#define	MOTORCOMM_REV			0x0a
++
+ #define	EXT_REG_ADDR			0x1e
+ #define	EXT_REG_DATA			0x1f
+ 
+@@ -65,6 +70,12 @@
+ #define	LOWEST_SET_BIT(mask)		((((mask) - 1) & (mask)) ^ (mask))
+ #define	SHIFTIN(x, mask)		((x) * LOWEST_SET_BIT(mask))
+ 
++static const struct mii_phydesc mcomphys[] = {
++	MII_PHY_DESC(MOTORCOMM, YT8511),
++	MII_PHY_DESC(MOTORCOMM, YT8521),
++	MII_PHY_END
++};
++
+ static int
+ mcommphy_service(struct mii_softc *sc, struct mii_data *mii, int cmd)
+ {
+@@ -106,13 +117,13 @@ mcommphy_probe(device_t dev)
+ 	 * The YT8511C reports an OUI of 0. Best we can do here is to match
+ 	 * exactly the contents of the PHY identification registers.
+ 	 */
+-	if (MII_OUI(ma->mii_id1, ma->mii_id2) == MCOMMPHY_OUI &&
+-	    MII_MODEL(ma->mii_id2) == MCOMMPHY_MODEL &&
+-	    MII_REV(ma->mii_id2) == MCOMMPHY_REV) {
+-		device_set_desc(dev, "Motorcomm YT8511 media interface");
+-		return BUS_PROBE_DEFAULT;
+-	}
+-	return (ENXIO);
++	if (MII_OUI(ma->mii_id1, ma->mii_id2) == MOTORCOMM_OUI &&
++	    MII_MODEL(ma->mii_id2) == MOTORCOMM_MODEL &&
++	    MII_REV(ma->mii_id2) == MOTORCOMM_REV) {
++ 		device_set_desc(dev, "Motorcomm YT8511 media interface");
++ 		return BUS_PROBE_DEFAULT;
++ 	}
++	return (mii_phy_dev_probe(dev, mcomphys, BUS_PROBE_DEFAULT));
+ }
+ 
+ static int
+diff --git a/sys/dev/mii/miidevs b/sys/dev/mii/miidevs
+index 78d1dddba..b742f696b 100644
+--- a/sys/dev/mii/miidevs
++++ b/sys/dev/mii/miidevs
+@@ -295,6 +295,7 @@ model MICREL KSZ9031		0x0022 Micrel KSZ9031 10/100/1000 PHY
+ 
+ /* Motorcomm PHYs */
+ model MOTORCOMM YT8511		0x010a Motorcomm YT8511 10/100/1000 PHY
++model MOTORCOMM YT8521		0x0011 Motorcomm YT8521 10/100/1000 PHY
+ 
+ /* Myson Technology PHYs */
+ model xxMYSON MTD972		0x0000 MTD972 10/100 media interface
+diff --git a/sys/dev/uart/uart.h b/sys/dev/uart/uart.h
+index 213f8eca4..459594de0 100644
+--- a/sys/dev/uart/uart.h
++++ b/sys/dev/uart/uart.h
+@@ -112,6 +112,7 @@ struct uart_class;
+ extern struct uart_class uart_ns8250_class __attribute__((weak));
+ extern struct uart_class uart_quicc_class __attribute__((weak));
+ extern struct uart_class uart_z8530_class __attribute__((weak));
++extern struct uart_class uart_pl011_class __attribute__((weak));
+ 
+ /*
+  * Device flags.
+diff --git a/sys/dev/uart/uart_cpu_arm64.c b/sys/dev/uart/uart_cpu_arm64.c
+index bfd3783fa..cfd007d4d 100644
+--- a/sys/dev/uart/uart_cpu_arm64.c
++++ b/sys/dev/uart/uart_cpu_arm64.c
+@@ -128,6 +128,12 @@ uart_cpu_getdev(int devtype, struct uart_devinfo *di)
+ 	/* Check if SPCR can tell us what console to use. */
+ 	if (uart_cpu_acpi_spcr(devtype, di) == 0)
+ 		return (0);
++
++	/* If none SPCR, try if it is pl011 uart */
++	class = &uart_pl011_class;
++	err = uart_getenv(devtype, di, class);
++	if (err == 0)
++		return (0);
+ #endif
+ #ifdef FDT
+ 	if (uart_cpu_fdt_setup(class, devtype, di) == 0)
+diff --git a/sys/dev/uart/uart_dev_pl011.c b/sys/dev/uart/uart_dev_pl011.c
+index 86b725dc1..515b6b9c8 100644
+--- a/sys/dev/uart/uart_dev_pl011.c
++++ b/sys/dev/uart/uart_dev_pl011.c
+@@ -318,14 +318,15 @@ static kobj_method_t uart_pl011_methods[] = {
+ 	{ 0, 0 }
+ };
+ 
+-static struct uart_class uart_pl011_class = {
++struct uart_class uart_pl011_class = {
+ 	"uart_pl011",
+ 	uart_pl011_methods,
+ 	sizeof(struct uart_pl011_softc),
+ 	.uc_ops = &uart_pl011_ops,
+ 	.uc_range = 0x48,
+ 	.uc_rclk = 0,
+-	.uc_rshift = 2
++	.uc_rshift = 2,
++	.uc_riowidth = 4
+ };
+ 
+ #ifdef FDT
+diff --git a/sys/dev/uart/uart_subr.c b/sys/dev/uart/uart_subr.c
+index c5b3b9e2d..295ce1267 100644
+--- a/sys/dev/uart/uart_subr.c
++++ b/sys/dev/uart/uart_subr.c
+@@ -52,6 +52,7 @@
+ static struct uart_class *uart_classes[] = {
+ 	&uart_ns8250_class,
+ 	&uart_z8530_class,
++	&uart_pl011_class,
+ };
+ 
+ static bus_addr_t
+diff --git a/sys/dev/usb/controller/xhci.c b/sys/dev/usb/controller/xhci.c
+index 17800dc11..26242d288 100644
+--- a/sys/dev/usb/controller/xhci.c
++++ b/sys/dev/usb/controller/xhci.c
+@@ -540,7 +540,8 @@ xhci_init(struct xhci_softc *sc, device_t self, uint8_t dma32)
+ 	DPRINTF("RUNTIMEOFFSET=0x%x\n", sc->sc_runt_off);
+ 	DPRINTF("DOOROFFSET=0x%x\n", sc->sc_door_off);
+ 
+-	DPRINTF("xHCI version = 0x%04x\n", XREAD2(sc, capa, XHCI_HCIVERSION));
++	uint32_t version = (XREAD4(sc, capa, XHCI_CAPLENGTH) >> 16) & 0xFFFF;
++	DPRINTF("xHCI version = 0x%04x\n", version);
+ 
+ 	if (!(XREAD4(sc, oper, XHCI_PAGESIZE) & XHCI_PAGESIZE_4K)) {
+ 		device_printf(sc->sc_bus.parent, "Controller does "
+diff --git a/sys/gdb/gdb_main.c b/sys/gdb/gdb_main.c
+index e0268f316..d43d9d91b 100644
+--- a/sys/gdb/gdb_main.c
++++ b/sys/gdb/gdb_main.c
+@@ -649,6 +649,9 @@ gdb_z_insert(void)
+ 		    (vm_size_t)length, KDB_DBG_ACCESS_RW);
+ 		break;
+ 	case '1': /* hardware breakpoint */
++		error = kdb_cpu_set_hwbreakpoint((vm_offset_t)addr,
++		    (vm_size_t)length);
++		break;
+ 	case '0': /* software breakpoint */
+ 		/* Not implemented. */
+ 		gdb_tx_empty();
+@@ -693,6 +696,9 @@ gdb_z_remove(void)
+ 		    (vm_size_t)length);
+ 		break;
+ 	case '1': /* hardware breakpoint */
++		error = kdb_cpu_clr_hwbreakpoint((vm_offset_t)addr,
++		    (vm_size_t)length);
++		break;
+ 	case '0': /* software breakpoint */
+ 		/* Not implemented. */
+ 		gdb_tx_empty();
+diff --git a/sys/modules/dtb/firefly/Makefile b/sys/modules/dtb/firefly/Makefile
+new file mode 100644
+index 000000000..a3733322f
+--- /dev/null
++++ b/sys/modules/dtb/firefly/Makefile
+@@ -0,0 +1,11 @@
++.if ${MACHINE_ARCH} == "armv7"
++DTS=	
++.elif ${MACHINE_ARCH} == "aarch64"
++DTS=	\
++	firefly/firefly_dsk_v1.dts \
++	firefly/firefly_pi_v2.dts \
++	firefly/firefly_dsk_v2.dts \
++	firefly/firefly_dsk_v3.dts
++.endif
++
++.include <bsd.dtb.mk>
+\ No newline at end of file
+-- 
+2.25.1
+

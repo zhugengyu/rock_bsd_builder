@@ -65,6 +65,10 @@ bsd/cheribuild
 bsd/freebsd
 bsd/netbsd
 
+bsd/firmware/arm-trusted-firmware
+bsd/firmware/u-boot
+bsd/firmware/output
+
 *.img
 *.tar.xz
 *.itb

@@ -21,6 +21,12 @@ make rock_linux_all
 ![linux_neofetch](./linux/doc/figs/linux_neofetch.png)
 
 - 烧录[Rock Pi N10 固件](https://dl.sd-card-images.johang.se/boots/2025-12-01/boot-rock_pi_n10.bin.gz) 到 SD 或 eMMC 中，编译下面的 FreeBSD/NetBSD 镜像，烧录到另一个介质或者 NVMe 盘
+- 源码构建 ATF 和 U-Boot 固件 (直接使用上面下载的固件就可以了，有需要再源码编译)
+
+```
+make rk3399_fw_all
+```
+
 - 构建 FreeBSD 14.3，通用镜像
 
 ```

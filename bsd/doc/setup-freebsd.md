@@ -1,3 +1,30 @@
+
+## 从 U-BOOT 启动系统
+
+- 启动 RK3399
+
+```
+run bootcmd_nvme
+```
+
+- 启动 Firefly PI
+
+```
+fatload nvme 0:1 0x90100000 /efi/boot/bootaa64.efi;
+fatload nvme 0:1 0xa0000000 /efi/boot/firefly_dsk_v2.dtb;
+bootefi 0x90100000 0xa0000000
+```
+
+- 设置固定 IP （如果需要的话）
+
+```
+ifconfig xmac0 10.31.94.219 netmask 255.255.255.0
+route add default 10.31.94.254
+echo 'nameserver 10.22.0.16' >> /etc/resolv.conf
+echo 'nameserver 10.22.0.165' >> /etc/resolv.conf
+echo 'nameserver 114.114.114.114' >> /etc/resolv.conf
+```
+
 ## SSH 连接
 
 - 允许 root 登录
@@ -44,17 +71,55 @@ md99    none    swap    sw,file=/swapfile,late  0       0
 
 ## 安装软件
 
+- 连接局域网的代理服务
+
 ```
 export http_proxy="http://192.168.00.129:7890"
 export https_proxy="http://192.168.00.129:7890"
+
+export http_proxy="http://10.31.94.103:7890"
+export https_proxy="http://10.31.94.103:7890"
 ```
+
+- 更新软件源，安装软件
 
 ```
 pkg update -f
-pkg install -y fastfetch nano llvm15 git python3 usbutils pciutils lscpu lsblk wget
+pkg install -y fastfetch nano llvm git python3 usbutils pciutils lscpu lsblk wget
+```
+
+- 环境变量写入 ~/.shrc
+```
+nano ~/.shrc
+
+# LLVM 工具的路径按照实际情况设置
+export PATH=/usr/local/bin:$PATH
+export CC=/usr/local/bin/clang
+export CXX=/usr/local/bin/clang++
+export LD=/usr/local/bin/ld.lld
+export CPP=/usr/local/bin/clang-cpp
+export HOSTCC=/usr/local/bin/clang
+export HOSTCXX=/usr/local/bin/clang++
+export LLVM_CONFIG=/usr/local/bin/llvm-config
+```
+
+- 检查环境变量
+```
+. ~/.shrc
+echo "CC: $CC"
+echo "CXX: $CXX"
+echo "LD: $LD"
+echo "CPP: $CPP"
+echo "HOSTCC: $HOSTCC"
+echo "HOSTCXX: $HOSTCXX"
+echo "LLVM_CONFIG: $LLVM_CONFIG"
 ```
 
 ![freebsd_pkg](./figs/freebsd_pkg.png)
+
+## 设置显示桌面
+
+> TODO
 
 ## 本地构建替换内核
 
@@ -63,24 +128,12 @@ pkg install -y fastfetch nano llvm15 git python3 usbutils pciutils lscpu lsblk w
 ```
 cd /usr/src
 git init
-git remote add origin https://gitlab.com/FreeBSD/freebsd-src.git
+git remote add origin https://github.com/freebsd/freebsd-src.git
 git fetch --depth 1 origin release/14.3.0
 git checkout FETCH_HEAD
 ```
 
 - 设置编译内核的工具
-
-```
-# LLVM 工具的路径按照实际情况设置
-export PATH=/usr/local/bin:$PATH
-export CC=/usr/local/bin/clang15
-export CXX=/usr/local/bin/clang++15
-export LD=/usr/local/bin/ld.lld15
-export CPP=/usr/local/bin/clang-cpp15
-export HOSTCC=/usr/local/bin/clang15
-export HOSTCXX=/usr/local/bin/clang++15
-export LLVM_CONFIG=/usr/local/bin/llvm-config15
-```
 
 ```
 cd /usr/src
@@ -161,56 +214,75 @@ uname -a
 mkdir -p /usr/ports
 cd /usr/ports
 git init .
-git remote add origin https://git.freebsd.org/ports.git
+git remote add origin https://github.com/freebsd/freebsd-ports.git
 git fetch --depth 1 origin release/14.3.0
 git checkout FETCH_HEAD
 ```
 
-- 配置特定的应用程序 ports，以 unixbench 为例
+- 配置特定的应用程序 ports，以 fio 为例
 
 ```
-# LLVM 工具的路径按照实际情况设置
-export PATH=/usr/local/bin:$PATH
-export CC=/usr/local/bin/clang15
-export CXX=/usr/local/bin/clang++15
-export LD=/usr/local/bin/ld.lld15
-export CPP=/usr/local/bin/clang-cpp15
-export HOSTCC=/usr/local/bin/clang15
-export HOSTCXX=/usr/local/bin/clang++15
-export LLVM_CONFIG=/usr/local/bin/llvm-config15
-
-cd /usr/ports/benchmarks/unixbench/
-# 参考前面的内容，配置 export CC= 等编译工具
+cd /usr/ports/benchmarks/fio/
 make config
 make package
 ```
 
-- 编译完成后可以直接使用刚刚编译出来的 unixbench 了
+- 编译完成后可以直接使用刚刚编译出来的 fio 了
 
 ```
-ls /usr/ports/benchmarks/unixbench/work/pkg
-pkg add /usr/ports/benchmarks/unixbench/work/pkg/unixbench-<version>.txz
+ls /usr/ports/benchmarks/fio/work/pkg
+pkg add /usr/ports/benchmarks/fio/work/pkg/fio-<version>.txz
 
-unixbench --version
+fio --version
+
+# 测试顺序写性能
+fio --name=write_test --filename=/tmp/fio_write_test.bin \
+    --rw=write --bs=1M --size=1G --numjobs=1 \
+    --iodepth=1 --runtime=30 --time_based \
+    --group_reporting --direct=1
+# 测试随机写性能
+fio --name=randwrite_test --filename=/tmp/fio_randwrite_test.bin \
+    --rw=randwrite --bs=4k --size=1G --numjobs=1 \
+    --iodepth=1 --runtime=30 --time_based \
+    --group_reporting --direct=1
+
+# 测试顺序读性能
+dd if=/dev/zero of=/tmp/fio_read_test.bin bs=1M count=1024
+fio --name=read_test --filename=/tmp/fio_read_test.bin \
+    --rw=read --bs=1M --size=1G --numjobs=1 \
+    --iodepth=1 --runtime=30 --time_based \
+    --group_reporting --direct=1
+
+# 测试随机读性能
+fio --name=randread_test --filename=/tmp/fio_read_test.bin \
+    --rw=randread --bs=4k --size=1G --numjobs=1 \
+    --iodepth=1 --runtime=30 --time_based \
+    --group_reporting --direct=1
+
+# 测试混合读写性能
+fio --name=mixed_test --filename=/tmp/fio_mixed_test.bin \
+    --rw=randrw --rwmixread=70 --bs=4k --size=1G \
+    --numjobs=1 --iodepth=1 --runtime=30 --time_based \
+    --group_reporting --direct=1
+
+# 测试多线程顺序写
+fio --name=write_mt --filename=/tmp/fio_write_mt.bin \
+    --rw=write --bs=1M --size=512M --numjobs=4 \
+    --iodepth=1 --runtime=30 --time_based \
+    --group_reporting --direct=1
 ```
+
+![fio-write](./figs/fio-write.png)
 
 ## 使用 crochet 构建镜像
 
 > 使用 root 用户进行编译，编译前确保 freebsd 源码下载到 /usr/src 目录下
 ```
-# LLVM 工具的路径按照实际情况设置
-export PATH=/usr/local/bin:$PATH
-export CC=/usr/local/bin/clang15
-export CXX=/usr/local/bin/clang++15
-export LD=/usr/local/bin/ld.lld15
-export CPP=/usr/local/bin/clang-cpp15
-export HOSTCC=/usr/local/bin/clang15
-export HOSTCXX=/usr/local/bin/clang++15
-export LLVM_CONFIG=/usr/local/bin/llvm-config15
-
 git clone https://github.com/freebsd/crochet.git
 cd crochet
 pkg install u-boot-nanopi-r4s
 export IMAGE_SIZE=4096
 /bin/sh crochet.sh -b NanoPi-R4S -v
 ```
+
+![build-crochet](./figs/build-crochet.png)

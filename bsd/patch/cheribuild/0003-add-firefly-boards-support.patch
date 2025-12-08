@@ -1,0 +1,190 @@
+From 841892067d0bdefaa5a8175bf56a22cc9bbbb970 Mon Sep 17 00:00:00 2001
+From: zhugengyu <zhugengyu2023@gmail.com>
+Date: Mon, 8 Dec 2025 19:07:26 +0800
+Subject: [PATCH] add firefly boards support
+
+---
+ pycheribuild/files/cheribsd/loader.conf.in    | 32 ++++++++++++++
+ pycheribuild/files/cheribsd/rc.conf.in        | 14 ++++++
+ pycheribuild/files/cheribsd/resolv.conf.in    |  1 +
+ .../files/cheribsd/wpa_supplicant.conf.in     |  4 ++
+ pycheribuild/projects/disk_image.py           | 44 ++++++++++++++++++-
+ 5 files changed, 94 insertions(+), 1 deletion(-)
+ create mode 100644 pycheribuild/files/cheribsd/loader.conf.in
+ create mode 100644 pycheribuild/files/cheribsd/resolv.conf.in
+ create mode 100644 pycheribuild/files/cheribsd/wpa_supplicant.conf.in
+
+diff --git a/pycheribuild/files/cheribsd/loader.conf.in b/pycheribuild/files/cheribsd/loader.conf.in
+new file mode 100644
+index 00000000..33bf80f6
+--- /dev/null
++++ b/pycheribuild/files/cheribsd/loader.conf.in
+@@ -0,0 +1,32 @@
++# Firefly dsk v1
++#   FreeBSD 14.3
++#hw.uart.console="dt:uart_pl011,mm:0x28001000,rs:2,br:115200,xo:48000000,sb:1"
++#hw.uart.dbgport="dt:uart_pl011,mm:0x28002000,rs:2,br:115200,xo:48000000,sb:1"
++
++# Firefly pi v2
++#   FreeBSD 15
++#hw.uart.console="dt:pl011,mm:0x2800d000,rs:2,br:115200,xo:100000000,sb:1,rw:4"
++#hw.uart.dbgport="dt:pl011,mm:0x2800e000,rs:2,br:115200,xo:100000000,sb:1,rw:4"
++#   FreeBSD 14.3
++#hw.uart.console="dt:uart_pl011,mm:0x2800d000,rs:2,br:115200,xo:100000000,sb:1"
++#hw.uart.dbgport="dt:uart_pl011,mm:0x2800e000,rs:2,br:115200,xo:100000000,sb:1"
++
++# Firefly dsk v3
++#   FreeBSD 14.3
++#hw.uart.console="dt:uart_pl011,mm:0x28009000,rs:2,br:115200,xo:100000000,sb:1"
++#hw.uart.dbgport="dt:uart_pl011,mm:0x2800a000,rs:2,br:115200,xo:100000000,sb:1"
++
++# Firefly dsk v4
++#   FreeBSD 14.3
++#hw.uart.console="dt:uart_pl011,mm:0x18002000,rs:2,br:115200,xo:100000000,sb:1"
++
++compat.linuxkpi.skb.mem_limit=1
++
++# disable SMP
++#kern.smp.disabled=1
++#hw.pci.realloc_bars=1
++
++# override loaded dtb
++#hint.acpi.0.disabled=1
++#firefly_dsk_v3.dtb_type="dtb"
++#firefly_dsk_v3.dtb_load="YES"
+\ No newline at end of file
+diff --git a/pycheribuild/files/cheribsd/rc.conf.in b/pycheribuild/files/cheribsd/rc.conf.in
+index 73b5b57f..a46d6fb3 100644
+--- a/pycheribuild/files/cheribsd/rc.conf.in
++++ b/pycheribuild/files/cheribsd/rc.conf.in
+@@ -16,3 +16,17 @@ nfs_client_enable="YES"
+ fsck_y_enable="YES"
+ fsck_y_flags="-T ffs:-R -T ufs:-R"
+ crashinfo_enable=NO	# gdb runs for 5+ minutes on F1 if present...
++
++#ifconfig_xmac0="inet 192.168.4.20 netmask 255.255.255.0"
++#ifconfig_gmac0="inet 192.168.4.20 netmask 255.255.255.0"
++#defaultrouter="192.168.4.30"
++
++## RTL8188EU USB Wifi
++#wlans_rtwn0="wlan0"
++#ifconfig_wlan0="WPA SYNCDHCP"
++#create_args_wlan0="country CN regdomain NONE"
++
++## RTL8852BE PCIe Wifi
++#wlans_rtw890="wlan0"
++#ifconfig_wlan0="WPA SYNCDHCP"
++#create_args_wlan0="country CN regdomain NONE"
+\ No newline at end of file
+diff --git a/pycheribuild/files/cheribsd/resolv.conf.in b/pycheribuild/files/cheribsd/resolv.conf.in
+new file mode 100644
+index 00000000..4c59ac40
+--- /dev/null
++++ b/pycheribuild/files/cheribsd/resolv.conf.in
+@@ -0,0 +1 @@
++nameserver 114.114.114.114
+\ No newline at end of file
+diff --git a/pycheribuild/files/cheribsd/wpa_supplicant.conf.in b/pycheribuild/files/cheribsd/wpa_supplicant.conf.in
+new file mode 100644
+index 00000000..00f247b9
+--- /dev/null
++++ b/pycheribuild/files/cheribsd/wpa_supplicant.conf.in
+@@ -0,0 +1,4 @@
++network={
++ssid="phytium_net"
++psk="phytium-net"
++}
+\ No newline at end of file
+diff --git a/pycheribuild/projects/disk_image.py b/pycheribuild/projects/disk_image.py
+index 3c118688..344b5594 100644
+--- a/pycheribuild/projects/disk_image.py
++++ b/pycheribuild/projects/disk_image.py
+@@ -110,6 +110,14 @@ class _AdditionalFileTemplates:
+     def get_dot_bash_profile_template(self):
+         return include_local_file("files/cheribsd/dot.bash_profile.in")
+ 
++    def get_loader_conf_template(self):
++        return include_local_file("files/cheribsd/loader.conf.in")
++
++    def get_resolv_conf_template(self):
++        return include_local_file("files/cheribsd/resolv.conf.in")
++
++    def get_wpa_supplicant_conf_template(self):
++        return include_local_file("files/cheribsd/wpa_supplicant.conf.in")
+ 
+ def _default_disk_image_name(_: CheriConfig, directory: Path, project: "BuildDiskImageBase"):
+     if project.use_qcow2:
+@@ -391,6 +399,16 @@ class BuildDiskImageBase(SimpleProject):
+             "/etc/rc.conf", contents=rc_conf_contents, mode=0o644, show_contents_non_verbose=False
+         )
+ 
++        resolv_conf_contents = self.file_templates.get_resolv_conf_template()
++        self.create_file_for_image(
++            "/etc/resolv.conf", contents=resolv_conf_contents, mode=0o644, show_contents_non_verbose=False
++        )
++
++        wpa_supplicant_conf_contents = self.file_templates.get_wpa_supplicant_conf_template()
++        self.create_file_for_image(
++            "/etc/wpa_supplicant.conf", contents=wpa_supplicant_conf_contents, mode=0o644, show_contents_non_verbose=False
++        )
++
+         cshrc_contents = self.file_templates.get_cshrc_template().format(
+             SRCPATH=self.config.source_root, ROOTFS_DIR=self.rootfs_dir
+         )
+@@ -537,7 +555,7 @@ class BuildDiskImageBase(SimpleProject):
+                         self.run_cmd("chmod", "0700", authorized_keys.parent.parent, authorized_keys.parent)
+                         self.run_cmd("chmod", "0600", authorized_keys)
+ 
+-        loader_conf_contents = ""
++        loader_conf_contents = self.file_templates.get_loader_conf_template()
+         if self.is_x86:
+             loader_conf_contents += 'console="comconsole"\nautoboot_delay=0\n'
+         if self.no_autoboot:
+@@ -733,6 +751,20 @@ class BuildDiskImageBase(SimpleProject):
+             if efi_partition is not None:
+                 self.delete_file(efi_partition)  # no need to keep the partition now that we have built the full image
+ 
++    def copy_dtb_in_makefs(self, efi_mtree, vendor, dtb_name):
++        efi_mtree.add_file(
++            self.rootfs_dir / "boot" / "dtb" / vendor / dtb_name, path_in_image="efi/boot/" + dtb_name, mode=0o644
++        )
++
++    def copy_dtb_in_mtools(self, mtools_bin, efi_partition, efi_file, vendor, dtb_name):
++        self.run_cmd(
++            mtools_bin / "mcopy",
++            "-i",
++            efi_partition,
++            self.rootfs_dir / "boot" / "dtb" / vendor / dtb_name,
++            "::/EFI/BOOT/" + efi_file.upper(),
++        )
++
+     def make_efi_partition(self, efi_partition: Path):
+         # See Table 15. UEFI Image Types, UEFI spec v2.8 (Errata B)
+         efi_machine_type_short_names = {
+@@ -758,6 +790,11 @@ class BuildDiskImageBase(SimpleProject):
+                 efi_mtree.add_file(
+                     self.rootfs_dir / "boot" / loader_file, path_in_image="efi/boot/" + efi_file.lower(), mode=0o644
+                 )
++                self.copy_dtb_in_makefs(efi_mtree, "firefly", "firefly_dsk_v3.dtb")
++                self.copy_dtb_in_makefs(efi_mtree, "firefly", "firefly_pi_v2.dtb")
++                self.copy_dtb_in_makefs(efi_mtree, "firefly", "firefly_dsk_v2.dtb")
++                self.copy_dtb_in_makefs(efi_mtree, "firefly", "firefly_dsk_v1.dtb")
++                self.copy_dtb_in_makefs(efi_mtree, "rockchip", "rk3399pro-toybrick-prod.dtb")
+                 efi_mtree.write(tmp_mtree, pretend=self.config.pretend)
+                 tmp_mtree.flush()  # ensure the file is actually written
+                 self.run_cmd("cat", tmp_mtree.name)
+@@ -797,6 +834,11 @@ class BuildDiskImageBase(SimpleProject):
+                     self.rootfs_dir / "boot" / loader_file,
+                     "::/EFI/BOOT/" + efi_file.upper(),
+                 )
++                self.copy_dtb_in_mtools(mtools_bin, efi_partition, efi_file, "firefly", "firefly_dsk_v3.dtb")
++                self.copy_dtb_in_mtools(mtools_bin, efi_partition, efi_file, "firefly", "firefly_pi_v2.dtb")
++                self.copy_dtb_in_mtools(mtools_bin, efi_partition, efi_file, "firefly", "firefly_dsk_v2.dtb")
++                self.copy_dtb_in_mtools(mtools_bin, efi_partition, efi_file, "firefly", "firefly_dsk_v1.dtb")
++                self.copy_dtb_in_mtools(mtools_bin, efi_partition, efi_file, "rockchip", "rk3399pro-toybrick-prod.dtb")
+             if (mtools_bin / "minfo").exists():
+                 # Get some information about the created image information:
+                 self.run_cmd(mtools_bin / "minfo", "-i", efi_partition)
+-- 
+2.25.1
+

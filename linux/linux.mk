@@ -28,7 +28,7 @@ ROCK_LINUX_ROOTFS_URL := https://github.com/zhugengyu/rock_bsd_builder/releases/
 ROCK_LINUX_ROOTFS_PACK := $(ROCK_LINUX_OUTPUT_DIR)/linaro-rootfs-arm64.7z
 ROCK_LINUX_ROOTFS_IMG := $(ROCK_LINUX_OUTPUT_DIR)/linaro-rootfs.img
 
-CROSS_COMPILE_TARGETS = rock_linux_depends rock_linux_dl rock_linux_uboot rock_linux_kernel rock_linux_image rock_linux_all
+CROSS_COMPILE_TARGETS = rock_linux_depends rock_linux_dl rock_linux_uboot rock_linux_kernel rock_linux_image rock_linux_all rk3399_fw_all rk3399_fw_build_uboot_mmc
 
 ifneq (,$(filter $(CROSS_COMPILE_TARGETS),$(MAKECMDGOALS)))
     export CROSS_COMPILE := $(ROCK_LINUX_OUTPUT_DIR)/gcc-linaro-7.3.1-2018.05-x86_64_aarch64-linux-gnu/bin/aarch64-linux-gnu-
