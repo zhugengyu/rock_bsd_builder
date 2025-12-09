@@ -133,25 +133,17 @@ git fetch --depth 1 origin release/14.3.0
 git checkout FETCH_HEAD
 ```
 
-- 设置编译内核的工具
-
-```
-cd /usr/src
-DEBUG_FLAGS="-g -Og" make kernel-toolchain buildkernel buildworld KERNCONF=GENERIC -j4
-```
-
 - 编译内核
 
 ```
 cd /usr/src
-DEBUG_FLAGS="-g -Og" make kernel-toolchain KERNCONF=GENERIC -j4
-DEBUG_FLAGS="-g -Og" make buildkernel KERNCONF=GENERIC -j4
+make buildkernel KERNCONF=GENERIC -j4
 ```
 
 - 编译用户态
 
 ```
-DEBUG_FLAGS="-g -Og" make buildworld -j4
+make buildworld -j4
 ```
 
 - 编译具体的 ko 文件，如设备树 dtb 和 rtw89 驱动
@@ -159,14 +151,14 @@ DEBUG_FLAGS="-g -Og" make buildworld -j4
 ```
 # 编译设备树
 cd /usr/src/sys/modules/dtb/rockchip
-DEBUG_FLAGS="-g -Og" make -j4
-DEBUG_FLAGS="-g -Og" make install
+make -j4
+make install
 ls -lh /boot/dtb
 
 # 编译 ko 模块
 cd /usr/src/sys/modules/rtw89
-DEBUG_FLAGS="-g -Og" make -j4
-DEBUG_FLAGS="-g -Og" make install
+make -j4
+make install
 ls -lh /boot/modules/if_rtw89.ko
 ```
 
@@ -174,10 +166,10 @@ ls -lh /boot/modules/if_rtw89.ko
 
 ```
 cd /usr/src/stand
-DEBUG_FLAGS="-g -Og" make clean
-DEBUG_FLAGS="-g -Og" make
+make clean
+make
 mkdir -p /usr/output
-DEBUG_FLAGS="-g -Og" make DESTDIR=/usr/output install
+make DESTDIR=/usr/output install
 ```
 
 - 安装系统内核然后重启
@@ -188,10 +180,10 @@ vi /boot/loader.conf
 kernel="kernel GENERIC"
 
 # 安装用户态，一般是不需要的
-DEBUG_FLAGS="-g -Og" make installworld
+make installworld
 
 ls -l /boot/kernel/kernel*
-DEBUG_FLAGS="-g -Og" make installkernel KERNCONF=GENERIC
+make installkernel KERNCONF=GENERIC
 ls -l /boot/kernel/kernel*
 sync
 poweroff
@@ -286,3 +278,4 @@ export IMAGE_SIZE=4096
 ```
 
 ![build-crochet](./figs/build-crochet.png)
+![build-crochet](./figs/build-crochet2.png)
