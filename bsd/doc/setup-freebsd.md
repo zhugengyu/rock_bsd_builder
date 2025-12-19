@@ -13,6 +13,10 @@ run bootcmd_nvme
 fatload nvme 0:1 0x90100000 /efi/boot/bootaa64.efi;
 fatload nvme 0:1 0xa0000000 /efi/boot/firefly_dsk_v2.dtb;
 bootefi 0x90100000 0xa0000000
+
+fatload scsi 0:1 0x90100000 /efi/boot/bootaa64.efi;
+fatload scsi 0:1 0xa0000000 /efi/boot/firefly_dsk_v2.dtb;
+bootefi 0x90100000 0xa0000000
 ```
 
 - 设置固定 IP （如果需要的话）
@@ -115,6 +119,13 @@ echo "HOSTCXX: $HOSTCXX"
 echo "LLVM_CONFIG: $LLVM_CONFIG"
 ```
 
+- 创建 python 软符号
+
+```
+which python3
+ln -s /usr/local/bin/python3 /usr/local/bin/python
+```
+
 ![freebsd_pkg](./figs/freebsd_pkg.png)
 
 ## 设置显示桌面
@@ -138,6 +149,15 @@ git checkout FETCH_HEAD
 ```
 cd /usr/src
 make buildkernel KERNCONF=GENERIC -j4
+
+或者
+
+make -j4 buildkernel \
+    KERNCONF=GENERIC \
+    TARGET=arm64 \
+    TARGET_ARCH=aarch64 \
+    MKMODULES=yes \
+    buildkernel
 ```
 
 - 编译用户态
@@ -263,6 +283,8 @@ fio --name=write_mt --filename=/tmp/fio_write_mt.bin \
     --iodepth=1 --runtime=30 --time_based \
     --group_reporting --direct=1
 ```
+
+dd if=/dev/zero of=/dev/da0 bs=512 count=10
 
 ![fio-write](./figs/fio-write.png)
 

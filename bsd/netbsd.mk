@@ -43,4 +43,12 @@ netbsd_aarch64_kernel:
 		build
 	@cp $(NETBSD_AARCH64_KERNELS)/$(NETBSD_AARCH64_KERNCONFIG)/netbsd . -f
 
+netbsd_amd64_image:
+	@cd $(NETBSD_DIR) &&  \
+		./build.sh -U -u -j12 \
+		-O $(NETBSD_ROOT_DIR)/build/netbsd-amd64-build \
+		-m amd64 \
+		releasekernel=GENERIC \
+		release live-image
+
 netbsd_all: netbsd_src_dl netbsd_aarch64_image

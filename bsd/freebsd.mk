@@ -37,6 +37,15 @@ freebsd_src_dl:
 		cd $(FREEBSD_DIR) && git am $(FREEBSD_ROOT_DIR)/patch/freebsd/*.patch; \
 	fi
 
+freebsd_upstream_src_dl:
+	@if [ ! -d $(CHERIBUILD_DIR) ]; then \
+		git clone $(CHERIBUILD_URL) $(CHERIBUILD_DIR) -b $(CHERIBUILD_BRANCH) && \
+		cd $(CHERIBUILD_DIR) && git checkout d6dc6aec9bf2bff0d35958ebec8a260899a0d062; \
+	fi
+	@if [ ! -d $(FREEBSD_DIR) ]; then \
+		git clone $(FREEBSD_URL) $(FREEBSD_DIR) -b $(FREEBSD_BRANCH) --depth=1; \
+	fi
+
 freebsd_aarch64_image:
 	$(CHERIBUILD_DIR)/cheribuild.py freebsd-aarch64 disk-image-freebsd-aarch64 \
 		--freebsd-with-default-options/debug-kernel \
@@ -47,14 +56,22 @@ freebsd_aarch64_image:
 		--freebsd/toolchain upstream-llvm \
 		--disk-image-freebsd/extra-files $(FREEBSD_ROOT_DIR)/build/extra-files \
 		--disk-image-freebsd/hostname arm64 \
-		--disk-image-freebsd/rootfs-type ufs \
+		--disk-image-freebsd/rootfs-type zfs \
 		--skip-update
 	@cp $(FREEBSD_ROOT_DIR)/build/output/freebsd-aarch64.img ./freebsd-aarch64.img
-#		--disk-image-freebsd/rockchip \
-		--disk-image-freebsd/rockchip_idbloader $(ROOT_DIR)/linux/out/u-boot/idbloader.img \
-		--disk-image-freebsd/rockchip_uboot $(ROOT_DIR)/linux/out/u-boot/uboot.img \
-		--disk-image-freebsd/rockchip_trust $(ROOT_DIR)/linux/out/u-boot/trust.img
-#	$(ROOT_DIR)/validate_rk3399_image.sh $(FREEBSD_ROOT_DIR)/build/output/freebsd-aarch64.img
+
+freebsd_amd64_image:
+	$(CHERIBUILD_DIR)/cheribuild.py freebsd-amd64 disk-image-freebsd-amd64 \
+		--freebsd-with-default-options/debug-kernel \
+		--kernel-config GENERIC-DEBUG \
+		--source-root $(FREEBSD_ROOT_DIR) \
+		--output-root $(FREEBSD_ROOT_DIR)/build/output \
+		--build-root $(FREEBSD_ROOT_DIR)/build \
+		--freebsd/toolchain upstream-llvm \
+		--disk-image-freebsd/extra-files $(FREEBSD_ROOT_DIR)/build/extra-files \
+		--disk-image-freebsd/hostname amd64 \
+		--disk-image-freebsd/rootfs-type zfs \
+		--skip-update
 
 freebsd_aarch64_run:
 	@echo "Run FreeBSD(AARCH64)"
